@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import * as report from "./partial-count-report.mjs";
 import * as core from "./partial-count-core.mjs";
+import { runReachOnce } from "./reach-report.mjs";
 import { DEFAULT_CALL_BUDGET } from "./approval-authority-adapter.mjs";
 
 const MIN = 60 * 1000;
@@ -928,6 +929,12 @@ const CR_REVIEW = {
 const CR_EVENT_ID = `${core.DAILY_EVENT_PREFIX.GITHUB}cr:77`;
 const lineOf = (text, prefix) =>
   text.split("\n").find((l) => l.startsWith(prefix)) ?? "";
+// 3R (판정 #20261120-0148) -- 캐시로 조회를 건너뛴 건수 s ≥ 1 인 회차의 ㄴ 머리 줄 끝에 붙는 표지(분자 = 하한). s = 0 이면 «없다».
+const SKIP_MARK = (s) => ` · 캐시로 조회 ${s}건 건너뜀 · 새 변경 요청 미수집`;
+const skipTailOf = (result) => {
+  const s = result.githubHumanActions.changeRequestCacheSkipped;
+  return s > 0 ? SKIP_MARK(s) : "";
+};
 const ghNumerator = (text) =>
   Number(/^- GitHub 사람 손 (\d+)건 이상/.exec(lineOf(text, GH_LINE))?.[1]);
 const offOpts = (rig) => ({
@@ -980,10 +987,11 @@ test("2R ⑴ 검토자 표 5회차: 같은 입력에서 캐시 켬 = 끔 -- ㄴ 
         ghNumerator(b.reportText),
         `회차 ${i + 1}: ㄴ GitHub 사람 손 분자`,
       );
+      // 3R: 캐시로 조회를 건너뛴 회차(s ≥ 1)는 머리 줄 끝에 표지가 붙는다 -- 표지 앞(분자 · 하한 토막)은 끔과 한 글자도 다르지 않다.
       assert.equal(
         lineOf(a.reportText, LN_HEAD),
-        lineOf(b.reportText, LN_HEAD),
-        `회차 ${i + 1}: ㄴ 머리 줄(분자 · 하한 토막)`,
+        lineOf(b.reportText, LN_HEAD) + skipTailOf(a),
+        `회차 ${i + 1}: ㄴ 머리 줄(분자 · 하한 토막 + 건너뜀 표지)`,
       );
     }
     // 끔 쪽 문면은 옛 그대로(캐시를 안 켠 회차는 새 표기가 없다).
@@ -1140,8 +1148,8 @@ test("2R ⑶ 없다는 쪽은 이월하지 않는다: 변경 요청이 없던 �
       );
       assert.equal(
         lineOf(p.rOn[i].reportText, LN_HEAD),
-        lineOf(p.rOff[i].reportText, LN_HEAD),
-        `회차 ${i + 1}: ㄴ 머리 줄`,
+        lineOf(p.rOff[i].reportText, LN_HEAD) + skipTailOf(p.rOn[i]),
+        `회차 ${i + 1}: ㄴ 머리 줄(+ 건너뜀 표지)`,
       );
     }
     for (const i of [3, 4]) {
@@ -1399,5 +1407,324 @@ test("2R ⑺ ㄱ 머리 줄 «외부 독립 앵커로 확인: N건» 에 캐시 
     }
   } finally {
     cleanupPair(p);
+  }
+});
+
+// ====================================================================================================================
+// 3R (판정 #20261120-0148 · 검토 2R P2-1 · P2-2 수리) -- 캐시로 조회를 건너뛴 회차의 ㄴ 머리 줄에도 «분자 = 하한» 표지.
+//
+// 2R 의 구멍: 캐시가 건너뛴 PR 에 «나중에» 생긴 변경 요청은 못 읽는다(끔보다 낮을 수 있는 유일한 방향). 그 사실은 ㄴ «GitHub 사람 손» 줄에는
+// 표지로 보였지만, 아침 보고가 읽는 ㄴ 머리 줄(`- 외부 독립 증거로 확인된 사건: …`)에는 없어 분자가 조용히 낮게 읽혔다.
+// 수리: s ≥ 1 인 회차의 ㄴ 머리 줄 끝에 «캐시로 조회 s건 건너뜀 · 새 변경 요청 미수집» · s = 0 인 회차의 머리 줄은 바이트 무변.
+// ====================================================================================================================
+
+// 검토 2R 입력 L: 회차 1 · 2 에는 변경 요청이 없고 회차 3 부터 가장 새 PR#3 에 사람 변경 요청이 «나중에» 생긴다 · 4회차.
+// (검토자 표 -- 켬 0·0·0·0 / 끔 0·0·1·1: 켬은 PR#3 이 캐시 재사용이라 새 변경 요청을 못 읽는다.)
+async function runInputL() {
+  const p = await runPair(3, () => {}, 2);
+  for (const rig of [p.on, p.off]) withCr(rig);
+  for (let i = 2; i < 4; i++) {
+    p.rOn.push(await cycle(p.on, i));
+    p.rOff.push(await cycle(p.off, i, offOpts(p.off)));
+  }
+  return p;
+}
+
+test("3R ⑴ 입력 L(병합 뒤 변경 요청 · 4회차): s ≥ 1 회차의 ㄴ 머리 줄 끝에 «캐시로 조회 s건 건너뜀 · 새 변경 요청 미수집» -- 표지 앞은 끔과 같고 분자는 하한으로 읽힌다", async () => {
+  const p = await runInputL();
+  try {
+    const nums = (rs) => rs.map((r) => r.githubHumanActions.changeRequest ?? 0);
+    assert.deepEqual(nums(p.rOff), [0, 0, 1, 1], "끔 = 0·0·1·1(검토자 표)");
+    assert.deepEqual(
+      nums(p.rOn),
+      [0, 0, 0, 0],
+      "켬 = 0·0·0·0(캐시가 새 요청을 못 읽는다)",
+    );
+    const skipped = p.rOn.map(
+      (r) => r.githubHumanActions.changeRequestCacheSkipped,
+    );
+    assert.deepEqual(skipped, [0, 1, 2, 3], "건너뛴 조회 s = 0·1·2·3");
+    skipped.forEach((s, i) => {
+      const head = lineOf(p.rOn[i].reportText, LN_HEAD);
+      const off = lineOf(p.rOff[i].reportText, LN_HEAD);
+      if (s === 0) {
+        assert.equal(head, off, `회차 ${i + 1}: s = 0 은 끔과 바이트 같다`);
+        assert.ok(!head.includes("캐시로 조회"), `회차 ${i + 1}: 표지 0`);
+      } else {
+        assert.ok(
+          head.endsWith(SKIP_MARK(s)),
+          `회차 ${i + 1}: 끝 표지 ${SKIP_MARK(s)}\n실제: ${head}`,
+        );
+        // 표지 앞 = 켬 자신의 분자(회차 3 · 4 는 끔보다 낮은 0 -- 바로 그 «조용히 낮게 읽히는» 값에 표지가 붙는 칸이다).
+        const n = p.rOn[i].githubHumanActions.humanTotal;
+        assert.equal(
+          head.slice(0, -SKIP_MARK(s).length),
+          `${LN_HEAD} 확인 ${n}건 이상 · GitHub 사람 손 목록 1개 미조회`,
+          `회차 ${i + 1}: 표지 앞 = 켬 자신의 분자 · 하한 토막`,
+        );
+        assert.ok(
+          n <= p.rOff[i].githubHumanActions.humanTotal,
+          `회차 ${i + 1}: 켬 분자는 끔보다 높지 않다(낮을 수 있는 방향)`,
+        );
+        assert.ok(
+          head.includes("건 이상"),
+          `회차 ${i + 1}: 분자는 «이상»(하한) 표기`,
+        );
+        assert.equal(head.split("캐시로 조회").length - 1, 1, "표지는 한 번만");
+      }
+    });
+    // 사람 손 줄의 옛 표지(2R)는 그대로 -- 머리 줄과 사람 손 줄 양쪽에 표지.
+    assert.ok(
+      lineOf(p.rOn[3].reportText, GH_LINE).includes(
+        "캐시로 조회 3건 건너뜀 · 새 변경 요청 미수집",
+      ),
+    );
+  } finally {
+    cleanupPair(p);
+  }
+});
+
+// 9bf90a5(3R 시작 head)에서 «프로덕션 진입점으로» 뽑은 s = 0 회차의 ㄴ 머리 줄 원문 -- 표지가 붙지 않고 바이트가 그대로다.
+const HEAD_NO_CR = `${LN_HEAD} 확인 0건 이상 · GitHub 사람 손 목록 1개 미조회`;
+const HEAD_WITH_CR = `${LN_HEAD} 확인 1건 이상 · GitHub 사람 손 목록 1개 미조회`;
+const BASELINE_HEADS = {
+  "변경요청없음-끔-1": HEAD_NO_CR,
+  "변경요청없음-끔-2": HEAD_NO_CR,
+  "변경요청없음-끔-3": HEAD_NO_CR,
+  "변경요청없음-켬-1": HEAD_NO_CR,
+  "변경요청있음-끔-1": HEAD_WITH_CR,
+  "변경요청있음-끔-2": HEAD_WITH_CR,
+  "변경요청있음-끔-3": HEAD_WITH_CR,
+  "변경요청있음-켬-1": HEAD_WITH_CR,
+};
+
+test("3R ⑵ s = 0 회차의 ㄴ 머리 줄은 9bf90a5 와 바이트 같다 -- 캐시 끔 여러 회차 · 캐시 켠 첫 회차(건너뜀 0) · 변경 요청 있는 입력 · 없는 입력", async () => {
+  const seen = {};
+  for (const [name, setup] of [
+    ["변경요청없음", () => {}],
+    ["변경요청있음", withCr],
+  ]) {
+    const p = await runPair(3, setup, 3);
+    try {
+      p.rOff.forEach((r, i) => {
+        seen[`${name}-끔-${i + 1}`] = lineOf(r.reportText, LN_HEAD);
+        assert.equal(skipTailOf(r), "", "끔은 건너뜀 0");
+      });
+      seen[`${name}-켬-1`] = lineOf(p.rOn[0].reportText, LN_HEAD);
+      assert.equal(p.rOn[0].githubHumanActions.changeRequestCacheSkipped, 0);
+    } finally {
+      cleanupPair(p);
+    }
+  }
+  assert.deepEqual(seen, BASELINE_HEADS);
+});
+
+// 건너뜀 표지는 «새 조회 없이 캐시로 판정한» 건수가 값일 때만 붙는다 -- 캐시를 켰어도 건너뜀이 0 인 회차(첫 회차 · 몫 안에 다 든 회차)는 옛 문면이다.
+test("3R ⑵ 캐시를 켜고 건너뜀이 0 인 회차(몫 2 -- 회차 총 호출 10 ≤ 12 라 사람 손 목록 몫이 남는다)의 머리 줄도 표지 0 · 끔과 바이트 같다", async () => {
+  const rig = makeRig(3);
+  const rigOff = makeRig(3);
+  try {
+    for (const r of [rig, rigOff]) withCr(r);
+    const on = await cycle(rig, 0, { maxMergeChecks: 2 });
+    const off = await cycle(rigOff, 0, {
+      ...offOpts(rigOff),
+      maxMergeChecks: 2,
+    });
+    assert.equal(on.githubHumanActions.changeRequestCacheSkipped, 0);
+    assert.equal(
+      lineOf(on.reportText, LN_HEAD),
+      lineOf(off.reportText, LN_HEAD),
+    );
+    assert.ok(!lineOf(on.reportText, LN_HEAD).includes("캐시로 조회"));
+  } finally {
+    cleanup(rig);
+    cleanup(rigOff);
+  }
+});
+
+// reach-report(아침 보고) 판독 -- 부분 계수 보고서 «텍스트» 를 읽는 프로덕션 wire(runReachOnce). 표지 붙은 머리 줄을 깨지지 않고 표지째 옮긴다.
+const REACH_WATCH_LINE = (ts) =>
+  `${new Date(ts).toISOString()} exit=0 verdict=PROGRESSING reason=OK ` +
+  `seat_status=SEAT_LIVENESS_NOT_APPLICABLE seat_verdict=NONE seat_worst_count=NONE seat_worktrees=1 ` +
+  `idle_status=SEAT_IDLE_NOT_APPLICABLE idle_verdict=NONE idle_worst_count=NONE idle_worktrees=1 ` +
+  `start_status=DISPATCH_START_NOT_APPLICABLE start_verdict=NONE start_worst_count=NONE start_worktrees=1 ` +
+  `unconsumed_status=UNCONSUMED_NOT_APPLICABLE unconsumed_verdict=NONE unconsumed_worst_count=NONE unconsumed_worktrees=1`;
+
+function reachTickOver(root, reportText, nowMs) {
+  const watchLogPath = join(root, "watch.log");
+  const partialCountPath = join(root, "partial-count-report.md");
+  fs.writeFileSync(watchLogPath, REACH_WATCH_LINE(nowMs), "utf8");
+  fs.writeFileSync(partialCountPath, reportText, "utf8");
+  return runReachOnce({
+    watchLogPath,
+    partialCountPath,
+    reportOutPath: join(root, "morning-report.md"),
+    statePath: join(root, "state.json"),
+    notifyDir: join(root, "받는함"),
+    now: nowMs,
+  });
+}
+
+test("3R ⑶ 아침 보고(reach-report)가 표지 붙은 ㄴ 머리 줄을 깨지지 않고 표지째 옮긴다 -- 머리 줄 원문 그대로 · 후보 N 판독 · 자격 판독 · 통지 변화 켬 = 끔", async () => {
+  const p = await runPair(3, withCr, 3);
+  const root = tmpDir("nc-c1-reach-");
+  try {
+    const on = p.rOn[2];
+    const off = p.rOff[2];
+    assert.equal(skipTailOf(on), SKIP_MARK(2), "입력: 건너뜀 2 회차");
+    const head = lineOf(on.reportText, LN_HEAD);
+    assert.ok(head.endsWith(SKIP_MARK(2)), "표지 붙은 머리 줄");
+    const nowMs = NOW + 3 * STEP;
+    const reach = reachTickOver(root, on.reportText, nowMs);
+    assert.equal(
+      lineOf(reach.reportText, LN_HEAD),
+      head,
+      "아침 보고의 머리 줄 = 부분 계수 보고서의 머리 줄(표지째 · 한 글자도 안 바뀐다)",
+    );
+    assert.ok(reach.reportText.includes(head));
+    // 같은 줄 판독기들이 표지 때문에 깨지지 않는다 -- 켬(표지 있음) 과 끔(표지 없음)이 같은 값을 읽는다.
+    const parsedOn = core.parseExternalEvidenceCandidateLine(on.reportText);
+    const parsedOff = core.parseExternalEvidenceCandidateLine(off.reportText);
+    assert.equal(parsedOn.state, "count", "후보 N 줄이 읽힌다");
+    assert.deepEqual(parsedOn, parsedOff);
+    assert.deepEqual(
+      core.parseQualificationLine(on.reportText),
+      core.parseQualificationLine(off.reportText),
+    );
+    // 끔 보고서로 돈 아침 보고와 통지 · 상태가 같다(표지는 통지 판독 값을 바꾸지 않는다).
+    const rootOff = tmpDir("nc-c1-reach-off-");
+    try {
+      const reachOff = reachTickOver(rootOff, off.reportText, nowMs);
+      assert.equal(reach.toNotify.length, reachOff.toNotify.length);
+      assert.equal(reach.noticePath === null, reachOff.noticePath === null);
+      assert.deepEqual(
+        JSON.parse(fs.readFileSync(join(root, "state.json"), "utf8")),
+        JSON.parse(fs.readFileSync(join(rootOff, "state.json"), "utf8")),
+      );
+    } finally {
+      fs.rmSync(rootOff, { recursive: true, force: true });
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    cleanupPair(p);
+  }
+});
+
+// 검토 2R P2-2(변이 D) -- «다시 조회한 sha 가 앞 양성 기록을 버린다» 는 변이를 잡는 칸. 입력 = 검토자 drive3(캐시에 양성 기록이 있는 sha 가
+// 6시간 뒤 재확인 대상이 되고, 그 재조회가 리뷰 응답을 받기 전에 HTTP 500 으로 실패한다).
+test("3R ⑷ 다시 조회한 sha 도 앞 양성 기록을 버리지 않는다: 재조회 HTTP 500(UNDECIDABLE · 응답 없음) · 재조회 응답에 그 변경 요청이 없음 -- 두 경우 모두 이월 1 · 캐시 항목 기록 보존", async () => {
+  const rig = makeRig(1);
+  try {
+    const s1 = rig.repo.mergeShas[0];
+    rig.fetch.behavior[s1] = "notapproved";
+    rig.fetch.extraReviews[1] = [CR_REVIEW];
+    const r1 = await cycle(rig, 0);
+    assert.equal(r1.gate4.notApproved, 1, "회차 1: NOT_APPROVED(승인 없음)");
+    assert.equal(r1.githubHumanActions.changeRequest, 1);
+    assert.equal(r1.githubHumanActions.changeRequestFresh, 1);
+    const savedIds = () =>
+      JSON.parse(fs.readFileSync(rig.cachePath, "utf8")).entries[
+        s1
+      ].changeRequests?.map((x) => x.id);
+    assert.deepEqual(savedIds(), ["77"], "회차 1 뒤 캐시 항목에 양성 기록");
+
+    // 회차 2: NOT_APPROVED 재확인 시한 지남 -> 다시 조회되는데 그 조회가 응답 전에 실패한다.
+    const t2 = NOW + report.NOT_APPROVED_RECHECK_MS + 15 * MIN;
+    rig.fetch.behavior[s1] = "http500";
+    const mark = rig.fetch.calls.pullsFor.length;
+    const r2 = await cycle(rig, 0, { now: t2 });
+    assert.deepEqual(lookedUpSince(rig, mark), [s1], "다시 조회된 sha");
+    assert.equal(r2.gate4.checked, 1);
+    assert.equal(r2.gate4.undecidable, 1, "재조회 실패 = UNDECIDABLE");
+    assert.equal(
+      r2.githubHumanActions.changeRequest,
+      1,
+      "앞 양성 기록이 살아 있다",
+    );
+    assert.equal(r2.githubHumanActions.changeRequestCarried, 1);
+    assert.equal(r2.githubHumanActions.changeRequestFresh, 0);
+    assert.deepEqual(savedIds(), ["77"], "회차 2 뒤 캐시 항목 기록 보존");
+
+    // 회차 3: UNDECIDABLE 항목이 다시 조회되고 이번엔 응답이 오는데, 그 응답에는 그 변경 요청이 없다(기각 · 삭제) -- 한 번 일어난 사건은 낮추지 않는다.
+    rig.fetch.behavior[s1] = "notapproved";
+    rig.fetch.extraReviews[1] = [];
+    const r3 = await cycle(rig, 0, { now: t2 + STEP });
+    assert.equal(r3.gate4.checked, 1);
+    assert.equal(r3.gate4.notApproved, 1);
+    assert.equal(
+      r3.githubHumanActions.changeRequest,
+      1,
+      "응답에 없어도 앞 기록 ∪ 새 기록",
+    );
+    assert.equal(r3.githubHumanActions.changeRequestCarried, 1);
+    assert.deepEqual(savedIds(), ["77"]);
+  } finally {
+    cleanup(rig);
+  }
+});
+
+const GATE4_CALLS_PER_SHA = 5;
+
+// 사전 확인 값(코드 변경 아님) -- 캐시를 끄고 창 전체를 다시 조회하는 실행이 지금 인자로 가능한가.
+test("3R 사전 확인 값 고정: 캐시 끔 + 기본 몫(1) = 몇 회차를 돌아도 같은 앞자리 sha 한 건만 · 캐시 끔 + 몫 인자(--max-merge-checks) = 후보 수 W 면 한 회차에 창 전체 · 캐시 켬 + 기본 몫 = W 회차 · CLI 에서 캐시는 --watch-log 를 «안 주면» 꺼진다", async () => {
+  const W = 5;
+  const rig = makeRig(W);
+  const rigAll = makeRig(W);
+  try {
+    // 캐시 끔 · 기본 몫 1: 5회차를 돌아도 조회된 서로 다른 sha 는 1(가장 새 병합) -- 창 전체를 못 본다.
+    let last;
+    for (let i = 0; i < W; i++) last = await cycle(rig, i, offOpts(rig));
+    assert.equal(new Set(rig.fetch.calls.pullsFor).size, 1);
+    assert.equal(rig.fetch.calls.pullsFor.length, W);
+    assert.equal(last.gate4.uncheckedByBudget, W - 1);
+    // 캐시 끔 · 몫 인자 W: 한 회차에 W 건 전부(몫 인자 = CLI `--max-merge-checks W`).
+    const mark = rigAll.fetch.calls.gate4.length;
+    const all = await cycle(rigAll, 0, {
+      ...offOpts(rigAll),
+      maxMergeChecks: W,
+    });
+    assert.equal(all.gate4.checked, W);
+    assert.equal(all.gate4.uncheckedByBudget, 0);
+    assert.equal(all.gate4.approved, W);
+    assert.equal(new Set(rigAll.fetch.calls.pullsFor).size, W);
+    const gate4Calls = rigAll.fetch.calls.gate4.length - mark;
+    // 이 합성(승인 응답 1페이지 · 승인 sha)에서 sha 한 건당 ㄱ-4 호출 수 = 5(저장소 · 브랜치 · 병합 PR 찾기 · PR 상세 · 리뷰) -- callBudget 8 안.
+    assert.equal(gate4Calls, W * GATE4_CALLS_PER_SHA);
+    assert.ok(
+      GATE4_CALLS_PER_SHA <= DEFAULT_CALL_BUDGET,
+      "sha당 상한(callBudget 8) 안",
+    );
+    // 부수 값: 회차 합산 천장(12)을 ㄱ-4 만으로 넘기므로 같은 회차의 사람 손 목록(P3)은 몫 0 -> 미조회(예산) -- 전체 재조회 회차의 ㄴ 사람 손 분자는 «미조회».
+    assert.ok(W * GATE4_CALLS_PER_SHA > report.PER_TICK_CALL_CEILING);
+    assert.equal(
+      all.githubHumanActions.known,
+      false,
+      "사람 손 목록 몫 0 = 미조회",
+    );
+    // 캐시 켬 · 기본 몫: W 회차(ⓐ 칸이 값으로 이미 고정 -- 여기서는 경로 해석만).
+    const root = rig.root;
+    assert.equal(
+      report.resolveApprovalCachePath({}),
+      null,
+      "CLI 기본 = 캐시 끔",
+    );
+    assert.equal(
+      report.resolveApprovalCachePath({
+        watchLogPath: join(root, "watch.log"),
+      }),
+      join(root, CACHE_NAME),
+      "--watch-log 를 주면 그 옆 캐시 파일(켬)",
+    );
+    assert.equal(
+      report.resolveApprovalCachePath({
+        approvalCachePath: null,
+        watchLogPath: join(root, "watch.log"),
+      }),
+      null,
+      "주입 null = 끔(CLI 인자로는 못 준다)",
+    );
+  } finally {
+    cleanup(rig);
+    cleanup(rigAll);
   }
 });

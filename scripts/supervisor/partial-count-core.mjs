@@ -650,7 +650,8 @@ function buildLnSection(
   // HYK-255-p5a-perm-1 -- ㄴ 분자 = D1 확인분 + 권한 확인창 사람 답(N+W+U · 통역 포함). 판정 불가 K · 필드 없는 세션 ·
   // 읽기 실패 · 수집 실패는 «이상» 토막으로 하한을 알린다(permissionAnswers 없음 = 미결선 = 옛 문면 그대로).
   lines.push(
-    `- 외부 독립 증거로 확인된 사건: ${renderConfirmedLnCount(confirmedCount, uncheckedForLowerBound, [...permissionGapPieces(permissionAnswers), ...githubGapPieces(githubHumanActions)])}`,
+    // HYK-255-c1-approval-cache-3 -- 캐시로 조회를 건너뛴 회차는 마지막 토막으로 «캐시로 조회 s건 건너뜀 · 새 변경 요청 미수집»(분자 = 하한) · s = 0 이면 토막 0.
+    `- 외부 독립 증거로 확인된 사건: ${renderConfirmedLnCount(confirmedCount, uncheckedForLowerBound, [...permissionGapPieces(permissionAnswers), ...githubGapPieces(githubHumanActions), ...githubCacheSkipGapPieces(githubHumanActions)])}`,
   );
   const externalEvidenceLine =
     renderExternalEvidenceCandidateLine(externalEvidence);
@@ -2752,6 +2753,18 @@ export function githubGapPieces(githubHumanActions) {
   }
   if (pieces.length === 0) pieces.push("GitHub 변경 요청 일부 PR 한정");
   return pieces;
+}
+
+// HYK-255-c1-approval-cache-3 (판정 #20261120-0148 · 검토 2R P2-1) -- ㄴ 머리 줄 하한 토막: 캐시로 조회를 건너뛴 건수 s ≥ 1 인 회차에만 «캐시로 조회 s건
+// 건너뜀 · 새 변경 요청 미수집» 을 머리 줄 끝에 붙인다(분자 = 하한 -- 건너뛴 PR 에 나중에 생긴 변경 요청은 못 읽는다). s = 0 · 캐시를 안 켠 회차 · 사람 손
+// 수집이 안 된 회차(known 아님)는 빈 배열 = 머리 줄 바이트 무변. 문면은 아래 «GitHub 사람 손» 줄의 표지(githubChangeRequestCell)와 같다.
+export function githubCacheSkipGapPieces(githubHumanActions) {
+  const g = githubHumanActions;
+  if (g?.known !== true) return [];
+  const skipped = g.changeRequestCacheSkipped;
+  return isCount(skipped) && skipped > 0
+    ? [`캐시로 조회 ${skipped}건 건너뜀 · 새 변경 요청 미수집`]
+    : [];
 }
 
 const GITHUB_LINE_PREFIX = "- GitHub 사람 손 ";
