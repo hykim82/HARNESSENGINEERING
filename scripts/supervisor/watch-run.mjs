@@ -112,6 +112,11 @@ import { runRateLimitStallOnce } from "./rate-limit-stall-wire.mjs";
 // ⛔OBSERVER · 앵커 아님(HUD 파일은 ORCH 도 쓸 수 있다 -- usage-threshold-core.mjs
 // 머리). opt-in(기본 null)이라 기존 호출자·기존 시험은 한 글자도 바뀌지 않는다.
 import { runUsageThresholdOnce } from "./usage-threshold-wire.mjs";
+// HYK-255-s1-anchor-seal-1 (S1 봉인 일지) -- ㄱ 보조 원천을 유형별 머클 뿌리로 접어
+// «뿌리가 바뀐 회차에만» 봉인 줄 1개를 원격 anchor-seal 가지에 non-force push 한다.
+// 기본 꺼짐(opt-in 인자 `--anchor-seal-remote` 가 없으면 이 단계는 실행되지 않고
+// watch.log 줄은 한 글자도 달라지지 않는다). 정직 한계 = anchor-seal.mjs 머리.
+import { runAnchorSealOnce } from "./anchor-seal.mjs";
 // HYK-285-always-1 (coder-task.md §1 "같은 자리에 같은 방식으로 붙인다") --
 // 어제 병합된 각성 배선(wake-wire.mjs, HYK-285-wake-*)의 발동 주체를
 // admissionSweep과 같은 opt-in 원칙으로 이 기존 주기에 얹는다. 판정·전송·
@@ -1783,6 +1788,18 @@ function usageThresholdLogSegment(result) {
   return typeof result.segment === "string" ? result.segment : null;
 }
 
+// HYK-255-s1-anchor-seal-1 -- watch.log 한 줄 안의 `anchor-seal:` 구간. 단계가 실행되지
+// 않은(opt-in 아님) 호출자는 null 이라 로그 줄이 한 글자도 달라지지 않는다(회귀 0).
+// 실패는 «FAILED» 토큰으로 시끄럽게 남는다(조용한 생략 금지).
+function anchorSealLogSegment(result) {
+  if (!isPlainObject(result) || result.notRun === true) return null;
+  if (result.failed === true) {
+    const msg = sanitizeFailureToken(result.message, "unknown");
+    return `anchor-seal: FAILED reason=${truncateToken(msg, 120)}`;
+  }
+  return typeof result.segment === "string" ? result.segment : null;
+}
+
 // escalation 축의 사람이 읽는 사유(§4 요건2 "막힌 워커가 있으면 사유가
 // 사람이 읽을 수 있게 실려야 한다", HYK-210 전례와 동일 형식 -- 공백
 // 치환·길이 상한·건수 상한+N_more). wakeHuman 스코프 전부(새 것이든
@@ -2509,6 +2526,9 @@ export function buildLogLine({
   // HYK-406-usage-watch-1: 기존 호출자 전부는 이 인자를 안 주므로 undefined ->
   // usageThresholdLogSegment 가 null -> 로그 줄이 한 글자도 달라지지 않는다.
   usageThreshold,
+  // HYK-255-s1-anchor-seal-1: 기존 호출자 전부는 이 인자를 안 주므로 undefined ->
+  // anchorSealLogSegment 가 null -> 로그 줄이 한 글자도 달라지지 않는다.
+  anchorSeal,
 }) {
   if (detectorResult.runnerFailure) {
     return `${nowIso} RUNNER_FAILURE message=${detectorResult.message}`;
@@ -2641,6 +2661,9 @@ export function buildLogLine({
     // HYK-406-usage-watch-1: 이 세그먼트도 지금 이 시점의 맨 끝이다 -- 앞선 모든
     // 세그먼트의 필드·순서·값은 이 라운드가 손대지 않았다.
     usageThresholdLogSegment(usageThreshold),
+    // HYK-255-s1-anchor-seal-1: 이 세그먼트도 지금 이 시점의 맨 끝이다 -- 앞선 모든
+    // 세그먼트의 필드·순서·값은 이 라운드가 손대지 않았다. opt-in 이 아니면 null.
+    anchorSealLogSegment(anchorSeal),
   ]
     .filter(Boolean)
     .join(" ");
@@ -2779,6 +2802,44 @@ export function runUsageThresholdStep({
       writeFn,
       mkdirFn,
       existsFn,
+    });
+  } catch (err) {
+    return {
+      notRun: false,
+      failed: true,
+      message: err && err.message ? err.message : String(err),
+    };
+  }
+}
+
+// HYK-255-s1-anchor-seal-1 (S1 봉인 일지) -- 봉인 단계. opt-in: `anchorSeal` 객체
+// (`{remote, sealDir?, patFile?, sources, ...}`)가 없으면 아예 실행하지 않는다
+// (runUsageThresholdStep 과 같은 모양 · git 호출 0 · 파일 0). ⛔이 단계 자신의 실패
+// (git 없음 · push 거절 · 원천 읽기 예외)는 감시 사이클 전체를 죽이지 않는다 -- 실패는
+// 결과 객체와 watch.log 의 `anchor-seal: FAILED reason=...` 구간에 남는다.
+export function runAnchorSealStep({
+  anchorSeal,
+  repoRoot,
+  watchDir,
+  now,
+  readFn,
+  writeFn,
+  renameFn,
+  mkdirFn,
+  gitFn,
+}) {
+  if (!isPlainObject(anchorSeal)) return { notRun: true };
+  try {
+    return runAnchorSealOnce({
+      ...anchorSeal,
+      repoRoot,
+      watchDir,
+      now,
+      readFn,
+      writeFn,
+      renameFn,
+      mkdirFn,
+      ...(gitFn ? { gitFn } : {}),
     });
   } catch (err) {
     return {
@@ -6244,6 +6305,40 @@ function writeCycleAliveRecord({
 // max-lines-per-function 수리를 위해 얇은 기본값 래퍼 runWatchOnce에서
 // 추출). 모든 파라미터는 이미 해석된 값이며, 이 함수 자신은 기본값을
 // 갖지 않는다(complexity를 늘리지 않는다) -- 로직·순서·값은 원문 그대로.
+// HYK-255-s1-anchor-seal-1 (max-lines-per-function 수리): finalizeWatchOnceCycle 안의
+// «로그 줄 덧붙이기 + 생존 기록 쓰기» 두 호출을 그대로 옮긴 것이다 -- 순서·값·부작용
+// 원문 그대로, 이름과 위치만 옮겼다(봉인 단계가 그 함수에 3줄을 더해 상한을 넘겨서).
+function writeCycleLogAndAliveRecord({
+  readFn,
+  writeFn,
+  renameFn,
+  logPath,
+  aliveRecordPath,
+  line,
+  maxLogLines,
+  now,
+  detectorResult,
+  sweepResult,
+  unconsumedVanish,
+}) {
+  appendLogWithRotation({
+    readFn,
+    writeFn,
+    logPath,
+    line,
+    maxLines: maxLogLines,
+  });
+  writeCycleAliveRecord({
+    writeFn,
+    renameFn,
+    aliveRecordPath,
+    now,
+    detectorResult,
+    sweepResult,
+    unconsumedVanish,
+  });
+}
+
 // HYK-228 4R (coder-task.md §1 항4): runWatchOnceCore에서 "로그 줄 조립 +
 // 생존 기록 쓰기 + reach 알림" 꼬리만 한 번 더 추출한다(prettier가 되돌린
 // 줄바꿈으로 84줄까지 다시 늘어난 것을 수리) -- 순서·값·부작용 모두 원문
@@ -6275,6 +6370,8 @@ function finalizeWatchOnceCycle({
   memoryReopen,
   // HYK-406-usage-watch-1: 사용량 임계 단계 결과(opt-in 아니면 undefined).
   usageThreshold,
+  // HYK-255-s1-anchor-seal-1: 봉인 단계 결과(opt-in 아니면 undefined).
+  anchorSeal,
 }) {
   const nowIso = new Date(now).toISOString();
   const logPath = path.join(watchDir, "watch.log");
@@ -6292,18 +6389,16 @@ function finalizeWatchOnceCycle({
     seatEscalation,
     memoryReopen,
     usageThreshold,
+    anchorSeal,
   });
-  appendLogWithRotation({
+  writeCycleLogAndAliveRecord({
     readFn,
     writeFn,
-    logPath,
-    line,
-    maxLines: maxLogLines,
-  });
-  writeCycleAliveRecord({
-    writeFn,
     renameFn,
+    logPath,
     aliveRecordPath,
+    line,
+    maxLogLines,
     now,
     detectorResult,
     sweepResult,
@@ -6331,6 +6426,7 @@ function finalizeWatchOnceCycle({
     seatEscalation,
     memoryReopen,
     usageThreshold,
+    anchorSeal,
   });
 }
 
@@ -6359,6 +6455,7 @@ function finalizeWatchOnceTail({
   seatEscalation,
   memoryReopen,
   usageThreshold,
+  anchorSeal,
 }) {
   const reachResult = runReachStep({
     notifyDir,
@@ -6396,6 +6493,7 @@ function finalizeWatchOnceTail({
     seatEscalation,
     memoryReopen,
     usageThreshold,
+    anchorSeal,
   };
 }
 
@@ -6694,6 +6792,10 @@ function runWatchOnceCore(params) {
     ...params,
     detectorResult,
   });
+  // HYK-255-s1-anchor-seal-1: 봉인 단계도 «로그 줄 조립 전» 이다(결과가 watch.log 한
+  // 줄의 `anchor-seal:` 구간이 된다). 입력(anchorSeal · repoRoot · watchDir · now · fs
+  // seam)은 전부 params 안에 있다. opt-in 아니면 {notRun:true} -- git 호출 0.
+  const anchorSealResult = runAnchorSealStep(params);
   const {
     sweepResult,
     wakeResult,
@@ -6730,6 +6832,7 @@ function runWatchOnceCore(params) {
     seatEscalation,
     memoryReopen,
     usageThreshold: usageThresholdResult,
+    anchorSeal: anchorSealResult,
   });
 }
 
@@ -6794,6 +6897,11 @@ export function runWatchOnce({
   // HYK-406-usage-watch-1 (조각 A): opt-in 객체 `{hudDir?, readdirFn?}`. 기본
   // null 이면 단계가 아예 실행되지 않는다(기존 호출자·기존 시험 회귀 0).
   usageThreshold = null,
+  // HYK-255-s1-anchor-seal-1 (S1 봉인 일지): opt-in 객체 `{remote, sealDir?, patFile?,
+  // sources, ...}`. 안 주면(undefined · null) 단계가 아예 실행되지 않는다(기존 호출자·
+  // 기존 시험 회귀 0 · watch.log 줄 바이트 동일). 기본값 `= null` 을 쓰지 않는 것은
+  // eslint complexity 상한(12) 때문이다 -- runAnchorSealStep 이 isPlainObject 로 거른다.
+  anchorSeal,
 }) {
   const fsFns = resolveWatchOnceFsFns({
     readFn,
@@ -6827,6 +6935,7 @@ export function runWatchOnce({
     memoryReopenSampleFn,
     memoryReopenSleepFn,
     usageThreshold,
+    anchorSeal,
   });
 }
 
@@ -6864,6 +6973,67 @@ export function buildUsageThresholdFromArgv(argv) {
     if (argv[i] === "--usage-hud-dir") hudDir = argv[++i];
   }
   return hudDir ? { hudDir } : {};
+}
+
+// HYK-255-s1-anchor-seal-1 (S1 봉인 일지): CLI 인자 -> `anchorSeal` opt-in 객체.
+// 프로덕션 CLI 와 시험이 똑같이 부르는 자리다(buildUsageThresholdFromArgv 와 같은 이유).
+// ⛔기본 꺼짐 -- `--anchor-seal-remote <경로|URL>` 이 없으면 null(= 단계 미실행 · 줄
+// 바이트 동일). 나머지 인자는 전부 이 인자가 있을 때만 의미가 있다. 실제 원격 기본값 ·
+// 실제 PAT 파일 경로 기본값은 코드에 두지 않는다(예약 작업 인자 적용은 ORCH 의 별도 상신).
+const ANCHOR_SEAL_SCALAR_FLAGS = Object.freeze({
+  "--anchor-seal-remote": (o, v) => {
+    o.remote = v;
+  },
+  "--anchor-seal-git-dir": (o, v) => {
+    o.sealDir = v;
+  },
+  "--anchor-seal-pat-file": (o, v) => {
+    o.patFile = v;
+  },
+  "--anchor-seal-bot-login": (o, v) => {
+    o.botLogin = v;
+  },
+  "--anchor-seal-state": (o, v) => {
+    o.statePath = v;
+  },
+  "--anchor-seal-outbox-dir": (o, v) => {
+    o.sources.outboxDir = v;
+  },
+  "--anchor-seal-inbox-dir": (o, v) => {
+    o.sources.inboxDir = v;
+  },
+  "--anchor-seal-ledger-dir": (o, v) => {
+    o.sources.ledgerDir = v;
+  },
+  "--anchor-seal-sessions-dir": (o, v) => {
+    o.sources.sessionsDirs.push(v);
+  },
+  "--anchor-seal-northstar-file": (o, v) => {
+    o.sources.northStarFile = v;
+  },
+});
+
+export function buildAnchorSealFromArgv(argv) {
+  const out = { sources: { sessionsDirs: [] } };
+  for (let i = 0; i < argv.length; i++) {
+    const handler = ANCHOR_SEAL_SCALAR_FLAGS[argv[i]];
+    if (handler) handler(out, argv[++i]);
+  }
+  return out.remote ? out : null;
+}
+
+// 원장 폴더만 기본값이 있다(reject-streak 원장의 실제 자리 = <repoRoot>/.harness ·
+// partial-count-report.mjs:2449 와 같다). 나머지 원천 경로는 «없으면 원천 없음(none)».
+export function withAnchorSealDefaults(anchorSeal, repoRoot) {
+  if (!isPlainObject(anchorSeal)) return anchorSeal;
+  if (anchorSeal.sources.ledgerDir || !repoRoot) return anchorSeal;
+  return {
+    ...anchorSeal,
+    sources: {
+      ...anchorSeal.sources,
+      ledgerDir: path.join(repoRoot, ".harness"),
+    },
+  };
 }
 
 const invokedDirectly =
@@ -7035,6 +7205,9 @@ if (invokedDirectly) {
     // HYK-406-usage-watch-1: 기본 켜짐 · 탈출구 --no-usage-threshold · HUD
     // 디렉터리 재정의 --usage-hud-dir (buildUsageThresholdFromArgv 참조).
     usageThreshold: buildUsageThresholdFromArgv(argv),
+    // HYK-255-s1-anchor-seal-1: 기본 꺼짐 -- --anchor-seal-remote 가 있을 때만 켜진다.
+    // 이 인자들은 기본 ledgerDir 을 repoRoot/.harness 로 채워 준다(아래).
+    anchorSeal: withAnchorSealDefaults(buildAnchorSealFromArgv(argv), repoRoot),
   });
   if (!noPartialCount) {
     // HYK-255-watch-wire-1 (coder-task.md §1 항2): 실패는 감시 로그 줄로
