@@ -3,7 +3,7 @@
 **상태: PROPOSED.** 이 문서는 관제실 라이브 파일을 쓰지 않는다 — 적용은 별도 상신 + 책임자 판정 뒤다(판정 #20261119-1406 ②: «관제실 적용은 별도»). 이 문서가 닿는 저장소 쪽 짝 = `scripts/supervisor/usage-snapshot-read-cli.mjs`(읽기 전용 CLI) · 시험 = `scripts/supervisor/usage-snapshot-read-cli.test.mjs`(패치 단위를 합성 사본에 적용해 실제 PowerShell 로 구동).
 
 **앵커를 자른 원본** = `D:\문서관리\하네스-관제실\memory-gate.ps1` · **SHA-256 `a7e19784e7864373ed421ae649917f863218ac8e6588d322614613ae9ea11a58`**(2026-11-19 14:18 KST 읽기 전용 · 판정 1138 적용판) · 줄끝 **LF**(274줄 · CR 0).
-**적용본 SHA-256 = `161726aacec6007aa312ea91f8228e7cd63a466297d42da35cd3a21097dd84e8`**(아래 «생성 명령»을 라이브 파일을 `--source` 로 읽기만 하고 스크래치 `--out` 에 쓴 값).
+**적용본 SHA-256 = `3611201b8176d621681068b8bd97cb3c0796fa40cc98ab8cc88a2aa3fc9cc48c`**(아래 «생성 명령»을 라이브 파일을 `--source` 로 읽기만 하고 스크래치 `--out` 에 쓴 값).
 
 **생성 명령**(이 라운드가 실제로 친 줄 · `--source` 는 읽기 전용 · `--out` 은 스크래치):
 
@@ -74,6 +74,7 @@ try {
   $wkPsi.FileName = 'node'
   $wkPsi.UseShellExecute = $false
   $wkPsi.RedirectStandardOutput = $true
+  $wkPsi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
   [void]$wkPsi.ArgumentList.Add($wkCli)
   if ($UsageHudDir) { [void]$wkPsi.ArgumentList.Add('--hud-dir'); [void]$wkPsi.ArgumentList.Add($UsageHudDir) }
   $wkProc = [System.Diagnostics.Process]::Start($wkPsi)
@@ -121,7 +122,7 @@ if ($wkWhy) {
 # 1. 적용본을 라이브가 아닌 곳에 만든다
 node scripts/check/control-room-patch-apply.mjs --doc docs/control-room-patches/HYK-406-memory-gate-wk.md --source "D:\문서관리\하네스-관제실\memory-gate.ps1" --out "D:\문서관리\하네스-관제실\.tmp\memory-gate.hyk406-applied.ps1"
 (Get-FileHash 'D:\문서관리\하네스-관제실\.tmp\memory-gate.hyk406-applied.ps1' -Algorithm SHA256).Hash.ToLower()
-#   기대값: 161726aacec6007aa312ea91f8228e7cd63a466297d42da35cd3a21097dd84e8
+#   기대값: 3611201b8176d621681068b8bd97cb3c0796fa40cc98ab8cc88a2aa3fc9cc48c
 
 # 2. 파싱 검사 (오류 0 -- 앞의 `$errs = $null;` 이 없으면 새 셸에서 거짓 0 이 나온다)
 $errs = $null; [System.Management.Automation.Language.Parser]::ParseFile('D:\문서관리\하네스-관제실\.tmp\memory-gate.hyk406-applied.ps1', [ref]$null, [ref]$errs) | Out-Null; $errs.Count

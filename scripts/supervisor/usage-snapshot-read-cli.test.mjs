@@ -488,6 +488,10 @@ test("wk 값 null(관측 불가) -> 열린다(fail-open) + 사유 줄(WK-GATE UN
       r.log,
       /WK-GATE UNOBSERVED \(fail-open\) status=unavailable reason=\S/,
     );
+    assert.ok(
+      r.log.includes("seven_day 값이 있는 것이 없다"),
+      "CLI 가 UTF-8 로 쓴 한글 사유가 게이트 로그에서 깨지면 안 된다(Windows 기본 코드페이지로 읽는 결함 방지)",
+    );
     assert.equal(
       r.log.includes("WK-GATE pass"),
       false,
@@ -506,6 +510,10 @@ test("wk 낡음(90분 전 99) -> 열린다 + 사유 줄(status=stale) · 낡은 
     assert.match(
       r.log,
       /WK-GATE UNOBSERVED \(fail-open\) status=stale reason=\S/,
+    );
+    assert.ok(
+      r.log.includes("값이 낡음 -- 마지막 갱신 90분 전"),
+      "낡음 사유(한글)가 깨지지 않고 로그에 남아야 한다",
     );
   });
 });
