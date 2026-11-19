@@ -316,6 +316,10 @@ const SYNTHETIC_GATE = [
   "  [switch]$DryRun",
   ")",
   "$ErrorActionPreference = 'Stop'",
+  // 합성 스트레스: 한국어 Windows 콘솔 코드페이지(949)를 흉내낸다. .NET Process 는 StandardOutputEncoding 을
+  // 지정하지 않으면 콘솔 코드페이지로 읽으므로, 패치 블록이 UTF-8 을 명시하지 않으면 CLI 의 한글 사유가 깨진다
+  // (2026-11-19 실측). 리눅스(UTF-8 기본)에서는 같은 줄이 아무 영향이 없다 -- 기대값은 양쪽 같다(한글 사유 원문).
+  "try { [Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding(949) } catch { }",
   "$OUT = $LogPath",
   "$WT = $Worktree",
   "$script:MODE = 'NORMAL'",
