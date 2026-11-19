@@ -760,3 +760,123 @@ test("라이브 설치 0: 실제 설치기로 합성 대상에 설치하면 shim
     rmSync(base, { recursive: true, force: true });
   }
 });
+
+// ── P2-b (HYK-389 조각 2): node 가 PATH 에 없으면 «조용한 마비(종료 0)» 가 아니다 ──
+// 예전 orca.ps1 은 `& node $cli @args` 가 node 부재로 돌지 못해도 $LASTEXITCODE 가 안
+// 바뀌어 `exit $code` 가 0 이 될 수 있었다(위임 0 인데 «성공»). 수리 뒤: 비0 + stderr
+// 사유 줄. 자식 PATH 는 pwsh · 시스템 디렉터리만 둔다(node 없음 -- 값으로 먼저 확인).
+// 비-Windows · pwsh 없음 = skip 이 아니라 «사유 있는 분기»(skip 수 무변).
+const MSG_NODE_MISSING = "ORCA_SHIM_NODE_MISSING";
+
+function pwshExecutablePath() {
+  if (!PWSH) return null;
+  const r = spawnSync(
+    PWSH,
+    ["-NoLogo", "-NoProfile", "-Command", "[Environment]::ProcessPath"],
+    { encoding: "utf8" },
+  );
+  const out = r.status === 0 ? r.stdout.trim() : "";
+  return out !== "" && existsSync(out) ? out : null;
+}
+
+function pathWithoutNode(extraDirs) {
+  const systemRoot = process.env.SystemRoot ?? "C:\\Windows";
+  return [...extraDirs, path.join(systemRoot, "System32"), systemRoot].join(
+    path.delimiter,
+  );
+}
+
+test("P2b[ps1] PATH 에 node 없음 -> 비0 종료 + ORCA_SHIM_NODE_MISSING 사유 줄 · 위임 0 · 원장 0 (조용한 마비 금지)", () => {
+  const pwshExe = IS_WIN ? pwshExecutablePath() : null;
+  if (!IS_WIN || pwshExe === null) {
+    const reason = !IS_WIN
+      ? "비-Windows -> ps1 칸 구동 안 함(사유 분기)"
+      : "pwsh 없음 -> ps1 칸 구동 안 함(사유 분기)";
+    console.log(`# P2b-ps1-branch ${reason}`);
+    assert.ok(reason.length > 0);
+    return;
+  }
+  withBox((box) => {
+    const env = childEnv(box, {
+      [ENV_SHIM_CLI]: CLI_PATH,
+      PATH: pathWithoutNode([path.dirname(pwshExe)]),
+    });
+    // 전제(값): 이 자식 환경에서 `node` 가 정말 해석되지 않는다.
+    const probe = spawnSync(
+      pwshExe,
+      [
+        "-NoLogo",
+        "-NoProfile",
+        "-Command",
+        "if (Get-Command node -ErrorAction SilentlyContinue) { 'FOUND' } else { 'ABSENT' }",
+      ],
+      { env, encoding: "utf8" },
+    );
+    assert.equal(probe.stdout.trim(), "ABSENT", `전제 실패: ${probe.stderr}`);
+    const r = spawnSync(
+      pwshExe,
+      [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-File",
+        path.join(SHIM_DIR, "orca.ps1"),
+        ...["terminal", "send", "--terminal", "t1", "--text", "x"],
+      ],
+      { env, cwd: box.root, encoding: "utf8" },
+    );
+    assert.notEqual(
+      r.status,
+      0,
+      `node 부재가 종료 0 이면 조용한 마비다: ${r.stderr}`,
+    );
+    // ASCII 사유 코드만 단언한다 -- pwsh 가 쓴 한글 문구는 콘솔 코드페이지로 나와
+    // UTF-8 디코딩과 어긋날 수 있다(문구 «조회 실패 ≠ 위반 없음» 은 단언하지 않는다).
+    assert.ok(r.stderr.includes(MSG_NODE_MISSING), r.stderr);
+    assert.equal(doubleCalls(box).length, 0);
+    assert.equal(ledgerLines(box).length, 0);
+  });
+});
+
+test("P2b[sh] PATH 에 node 없음 -> sh shim 도 비0 종료(이미 그렇다 -- 값으로 고정) · 위임 0", () => {
+  if (SH === null) {
+    console.log("# P2b-sh-branch sh 없음 -> sh 칸 구동 안 함(사유 분기)");
+    return;
+  }
+  withBox((box) => {
+    const shDirs = IS_WIN
+      ? [
+          path.dirname(SH),
+          path.join(path.dirname(path.dirname(SH)), "usr", "bin"),
+        ]
+      : ["/usr/bin", "/bin"];
+    const env = childEnv(box, {
+      [ENV_SHIM_CLI]: CLI_PATH,
+      PATH: shDirs.join(path.delimiter),
+    });
+    const probe = spawnSync(
+      SH,
+      ["-c", "command -v node >/dev/null 2>&1 && echo FOUND || echo ABSENT"],
+      { env, encoding: "utf8" },
+    );
+    if (probe.stdout.trim() !== "ABSENT") {
+      console.log(
+        "# P2b-sh-branch 이 기계의 sh PATH 에 node 가 있다 -> 칸 구동 안 함(사유 분기)",
+      );
+      return;
+    }
+    const shim = path.join(SHIM_DIR, "orca").replace(/\\/g, "/");
+    const r = spawnSync(
+      SH,
+      [shim, "terminal", "send", "--terminal", "t1", "--text", "x"],
+      { env, cwd: box.root, encoding: "utf8" },
+    );
+    assert.notEqual(
+      r.status,
+      0,
+      `sh shim 의 node 부재도 비0 이어야 한다: ${r.stderr}`,
+    );
+    assert.equal(doubleCalls(box).length, 0);
+    assert.equal(ledgerLines(box).length, 0);
+  });
+});
