@@ -83,6 +83,41 @@ function cleanEnv() {
   return env;
 }
 
+// HYK-505-lock-clock-1: an injected, purely virtual clock for the
+// single-process cells that used to count on REAL elapsed time (a "waitMs
+// stays near zero" bound, a "N polls fit inside a tiny timeoutMs" count, a
+// real-wall-time "hang" guard). acquireRunnerLock already takes `nowMs` and
+// `sleepFn` seams (runner-lock.mjs resolveAcquireLockOptions) -- this helper
+// only feeds them: `sleepFn(ms)` advances `nowMs()` by exactly `ms` and
+// records the call, nothing ever really sleeps, so the cell's outcome is a
+// pure function of the algorithm's own event order and cannot depend on
+// machine load, a slow disk, a PowerShell identity query or a wall-clock
+// jump. The runaway guard turns a polling loop that would never reach its
+// timeout (the "hang" the old real-wall-time guards looked for) into a
+// failing assertion with a reason instead of an endless loop.
+const VIRTUAL_CLOCK_BASE_MS = 1_700_000_000_000;
+const VIRTUAL_CLOCK_RUNAWAY_SLEEPS = 100_000;
+function makeVirtualClock(startMs = VIRTUAL_CLOCK_BASE_MS) {
+  let current = startMs;
+  const sleeps = [];
+  const nowMs = () => current;
+  const sleepFn = (ms) => {
+    sleeps.push(ms);
+    if (sleeps.length > VIRTUAL_CLOCK_RUNAWAY_SLEEPS) {
+      throw new Error(
+        `virtual clock: ${sleeps.length} sleepFn calls and still polling at virtual +${current - startMs}ms -- the acquire loop is not reaching its timeout (a real hang would look like this)`,
+      );
+    }
+    current += Number(ms) || 0;
+  };
+  return {
+    baseMs: startMs,
+    sleeps,
+    seams: { nowMs, sleepFn },
+    elapsedMs: () => current - startMs,
+  };
+}
+
 // -- §1: defaultRunnerLockPath (unchanged from 2R -- this calculation is
 // not part of the (d) redesign, product_scope names it unchanged) --------
 
@@ -114,19 +149,34 @@ test("acquireRunnerLock: uncontended acquisition is immediate (waitMs 0, pollCou
   const dir = freshLockDir();
   const lockPath = join(dir, "r.lock");
   try {
+    // HYK-505: the old `waitMs <= 5` bound read the REAL clock around real
+    // file I/O (write tmp + link + unlink + alive file) -- one slow disk op
+    // or scheduling stall (seam: Date.now drift 7ms/call, or 15ms per fs
+    // call) made it red though nothing contended. Now a virtual clock that
+    // only moves when the algorithm itself sleeps: "immediate" is asserted
+    // as an event order (zero sleepFn calls, waitMs exactly 0), which is
+    // stricter than "near zero", never weaker.
+    const clock = makeVirtualClock();
     const r = acquireRunnerLock({
       lockPath,
       pid: 4242,
       startedAtMs: 1000,
       worktree: "/src",
       head: "deadbeef",
+      ...clock.seams,
       env: cleanEnv(),
     });
     assert.equal(r.acquired, true);
     assert.equal(r.nested, false);
-    assert.ok(
-      r.waitMs <= 5,
-      `waitMs (${r.waitMs}) must be near-zero with no contention`,
+    assert.equal(
+      r.waitMs,
+      0,
+      `waitMs (${r.waitMs}) must be exactly 0 on the virtual clock -- an uncontended claim never lets time pass`,
+    );
+    assert.deepEqual(
+      clock.sleeps,
+      [],
+      "an uncontended acquisition must claim on the first attempt, never calling sleepFn",
     );
     assert.equal(r.pollCount, 0);
     assert.equal(r.reclaimedOrphan, false);
@@ -376,6 +426,19 @@ test("acquireRunnerLock: a readFileFn failure never triggers a reclaim (read fai
       }
       return realReadFileFn(p, enc);
     };
+    // HYK-505: the real-clock assumption here was "3 failed reads + 3 x
+    // 10ms sleeps + the 4th read all fit inside timeoutMs 80" -- and the
+    // 4th poll's judge also ran a REAL identity query (a PowerShell spawn,
+    // 100-400ms on Windows) that has to start before the deadline. Any
+    // stall (seam: Date.now drift 7ms/call, sleep x12, 15ms per fs call)
+    // put the deadline in front of the 4th read -> `readCalls > 3` red
+    // (evidence log: 409ms, assertion at the old :388). Now the deadline
+    // is virtual (80ms = exactly 8 polls of 10ms, independent of the
+    // machine) and the identity query is cost-stubbed (unknown identity ->
+    // ALIVE, same stub as the P2-3 cell below); the read-failure and
+    // eventual-timeout assertions are unchanged, plus an event-order
+    // assertion that the algorithm really slept through the 3 failures.
+    const clock = makeVirtualClock();
     const r = acquireRunnerLock({
       lockPath,
       pid: process.pid + 1,
@@ -383,9 +446,15 @@ test("acquireRunnerLock: a readFileFn failure never triggers a reclaim (read fai
       timeoutMs: 80,
       pollIntervalMs: 10,
       readFileFn,
+      getStartIdentityFn: () => null,
+      ...clock.seams,
       env: cleanEnv(),
     });
     assert.ok(readCalls > 3, "must have retried past the simulated failures");
+    assert.ok(
+      clock.sleeps.length >= 3,
+      `the 3 simulated read failures must each have cost a poll sleep (sleeps=${clock.sleeps.length})`,
+    );
     assert.equal(r.acquired, false);
     assert.equal(r.timedOut, true);
     assert.equal(
@@ -1017,12 +1086,19 @@ test("acquireRunnerLock: a live, same-identity owner whose heartbeat has gone st
       }),
     );
     const logs = [];
+    // HYK-505: `pollCount > 1` used to need a 2nd poll to start inside the
+    // REAL 80ms timeout -- red under a slow disk / clock stall (seam:
+    // 15ms per fs call, Date.now drift 40ms/call). Virtual clock: 80ms is
+    // exactly 16 polls of 5ms, so "many polls, one log line" is asserted
+    // on event order, not on how fast this machine is.
+    const clock = makeVirtualClock();
     const r = acquireRunnerLock({
       lockPath,
       pid: process.pid + 1,
       startedAtMs: 2,
       timeoutMs: 80,
       pollIntervalMs: 5,
+      ...clock.seams,
       heartbeatStaleMs: 1,
       // A cheap stub -- the REAL default spawns PowerShell per query on
       // Windows (seconds, not ms), which would starve this test of more
@@ -1161,7 +1237,15 @@ test("acquireRunnerLock: a lock whose heartbeat (L.alive.<lockId>) is FRESH is n
   const dir = freshLockDir();
   const lockPath = join(dir, "r.lock");
   try {
-    const realNow = Date.now();
+    // HYK-505: the "must stay bounded" guard compared REAL wall time to
+    // 5000ms (seam: a 3s wall-clock jump per Date.now call made it red
+    // with nothing hanging). Virtual clock instead: the guard is now the
+    // number of poll sleeps (a 60ms timeout at 10ms polls is ~6 sleeps; a
+    // staleness false-positive/hang would show as far more or as the
+    // runaway guard firing), independent of machine speed or clock jumps.
+    // The heartbeat age is computed against the same virtual clock.
+    const clock = makeVirtualClock();
+    const realNow = clock.baseMs;
     writeFileSync(
       lockPath,
       JSON.stringify({
@@ -1177,22 +1261,21 @@ test("acquireRunnerLock: a lock whose heartbeat (L.alive.<lockId>) is FRESH is n
       `${lockPath}.alive.fresh-owner-token`,
       JSON.stringify({ aliveAtMs: realNow - 10 }),
     );
-    const start = Date.now();
     const r = acquireRunnerLock({
       lockPath,
       pid: process.pid + 1,
       startedAtMs: realNow,
       timeoutMs: 60,
       pollIntervalMs: 10,
+      ...clock.seams,
       env: cleanEnv(),
     });
-    const elapsedWall = Date.now() - start;
     assert.equal(r.acquired, false);
     assert.equal(r.timedOut, true);
     assert.equal(r.reclaimedOrphan, false);
     assert.ok(
-      elapsedWall < 5000,
-      `must stay bounded (real wall time ${elapsedWall}ms) -- a hang would mean staleness false-positived`,
+      clock.sleeps.length >= 1 && clock.sleeps.length <= 60 / 10 + 2,
+      `must stay bounded (${clock.sleeps.length} poll sleeps for a 60ms timeout at 10ms polls) -- a hang would mean staleness false-positived`,
     );
     const content = JSON.parse(readFileSync(lockPath, "utf8"));
     assert.equal(content.lockId, "fresh-owner-token", "untouched");
@@ -1397,16 +1480,24 @@ test("acquireRunnerLock: a lock held by a live, same-identity pid past the upper
         lockId: "live-same-identity",
       }),
     );
-    const start = Date.now();
+    // HYK-505: same repair as the fresh-heartbeat cell above -- the real
+    // wall-time "bounded" guard (5000ms, which also had to absorb one or
+    // two REAL PowerShell identity queries per poll) becomes a virtual
+    // clock + poll-sleep bound. The identity query is cost-stubbed to the
+    // SAME identity the lock carries (same-identity verdict logic still
+    // runs for real, precedent: the P2-1 log-once cell above).
+    const clock = makeVirtualClock();
+    const myProcStart = defaultGetStartIdentity(process.pid);
     const r = acquireRunnerLock({
       lockPath,
       pid: process.pid + 1,
       startedAtMs: 2,
       timeoutMs: 60,
       pollIntervalMs: 10,
+      getStartIdentityFn: () => myProcStart,
+      ...clock.seams,
       env: cleanEnv(),
     });
-    const elapsedWall = Date.now() - start;
     assert.equal(r.acquired, false);
     assert.equal(r.timedOut, true);
     assert.equal(r.reclaimedOrphan, false);
@@ -1415,8 +1506,8 @@ test("acquireRunnerLock: a lock held by a live, same-identity pid past the upper
       `waitMs (${r.waitMs}) must reach the 60ms upper bound`,
     );
     assert.ok(
-      elapsedWall < 5000,
-      `this test must stay bounded (real wall time ${elapsedWall}ms) -- a real hang would mean the upper bound stopped working`,
+      clock.sleeps.length >= 1 && clock.sleeps.length <= 60 / 10 + 2,
+      `this test must stay bounded (${clock.sleeps.length} poll sleeps for a 60ms timeout at 10ms polls) -- a real hang would mean the upper bound stopped working`,
     );
     const content = JSON.parse(readFileSync(lockPath, "utf8"));
     assert.equal(content.pid, process.pid);
@@ -1641,6 +1732,18 @@ function lockRaceChildScript() {
     `const readyPath = process.argv[5] || "";`,
     `const counterpartReadyPath = process.argv[6] || "";`,
     `const rendezvousTimeoutMs = Number(process.argv[7] || 0);`,
+    // HYK-505: event-order contention proof for the GREEN (locked) cell.
+    // `waitingPath` is written the first time THIS child's acquire loop
+    // really sleeps (= it found the lock held); `holdUntilPath` keeps a
+    // child that claimed WITHOUT ever sleeping holding the lock until the
+    // counterpart's waiting marker exists. Both default to "" (skipped).
+    `const waitingPath = process.argv[8] || "";`,
+    `const holdUntilPath = process.argv[9] || "";`,
+    `let sleptOnce = false;`,
+    `const sleepFn = (ms) => {`,
+    `  if (waitingPath && !sleptOnce) { sleptOnce = true; writeFileSync(waitingPath, "1"); }`,
+    `  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.max(0, Number(ms) || 0));`,
+    `};`,
     `if (readyPath) {`,
     `  writeFileSync(readyPath, "1");`,
     `  const rendezvousStartMs = Date.now();`,
@@ -1652,9 +1755,18 @@ function lockRaceChildScript() {
     `  }`,
     `}`,
     `let r = { waitMs: 0, pollCount: 0, reclaimedOrphan: false, nested: false, lockId: null };`,
-    `if (!noLock) r = acquireRunnerLock({ lockPath, pollIntervalMs: 15, timeoutMs: ${GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS} });`,
+    `if (!noLock) r = acquireRunnerLock({ lockPath, pollIntervalMs: 15, timeoutMs: ${GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS}, ...(waitingPath ? { sleepFn } : {}) });`,
     `const acquiredAtMs = Date.now();`,
     `writeFileSync(outPath, JSON.stringify({ pid: process.pid, acquiredAtMs, r }) + "\\n");`,
+    `if (holdUntilPath && !sleptOnce) {`,
+    `  const holdUntilStartMs = Date.now();`,
+    `  while (!existsSync(holdUntilPath)) {`,
+    `    if (Date.now() - holdUntilStartMs > rendezvousTimeoutMs) {`,
+    `      throw new Error(\`hold-until timeout: counterpart never signalled it was waiting (\${holdUntilPath}) after \${rendezvousTimeoutMs}ms\`);`,
+    `    }`,
+    `    await new Promise((res) => setTimeout(res, 5));`,
+    `  }`,
+    `}`,
     `await new Promise((res) => setTimeout(res, holdMs));`,
     `const releasedAtMs = Date.now();`,
     `if (!noLock) releaseRunnerLock({ lockPath, lockId: r.lockId });`,
@@ -1670,6 +1782,8 @@ function spawnRaceChild({
   readyPath = "",
   counterpartReadyPath = "",
   rendezvousTimeoutMs = 0,
+  waitingPath = "",
+  holdUntilPath = "",
 }) {
   return new Promise((resolve) => {
     const child = spawn(
@@ -1686,6 +1800,8 @@ function spawnRaceChild({
         readyPath,
         counterpartReadyPath,
         String(rendezvousTimeoutMs),
+        waitingPath,
+        holdUntilPath,
       ],
       { stdio: "ignore", env: cleanEnv() },
     );
@@ -1756,10 +1872,36 @@ test("GREEN (locked): two real child processes started together on the SAME lock
   const out1 = join(dir, "out1.json");
   const out2 = join(dir, "out2.json");
   try {
+    // HYK-505: "exactly one child must have recorded a real wait" used to
+    // assume the two spawns start within one 250ms hold of each other; a
+    // late second child simply finds the lock free, and the `waitMs > 0`
+    // check was then satisfied (or not) by file-I/O jitter alone. Event
+    // order instead: whichever child claims first keeps holding until the
+    // OTHER child's acquire loop has really slept once (= found the lock
+    // held, marker file written from its sleepFn), so the contention is
+    // guaranteed whatever the start skew -- then asserted as pollCount.
+    const waiting1 = join(dir, "waiting1.flag");
+    const waiting2 = join(dir, "waiting2.flag");
     const t0 = Date.now();
     const codes = await Promise.all([
-      spawnRaceChild({ lockPath, holdMs: 250, outPath: out1, noLock: false }),
-      spawnRaceChild({ lockPath, holdMs: 250, outPath: out2, noLock: false }),
+      spawnRaceChild({
+        lockPath,
+        holdMs: 250,
+        outPath: out1,
+        noLock: false,
+        waitingPath: waiting1,
+        holdUntilPath: waiting2,
+        rendezvousTimeoutMs: GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS,
+      }),
+      spawnRaceChild({
+        lockPath,
+        holdMs: 250,
+        outPath: out2,
+        noLock: false,
+        waitingPath: waiting2,
+        holdUntilPath: waiting1,
+        rendezvousTimeoutMs: GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS,
+      }),
     ]);
     const wallMs = Date.now() - t0;
     assert.deepEqual(codes, [0, 0]);
@@ -1777,6 +1919,11 @@ test("GREEN (locked): two real child processes started together on the SAME lock
     assert.ok(
       waiter.r.waitMs > 0,
       "exactly one child must have recorded a real wait",
+    );
+    const holder = waiter === a ? b : a;
+    assert.ok(
+      waiter.r.pollCount >= 1 && holder.r.pollCount === 0,
+      `exactly one child must have polled against the held lock (event order, not jitter): waiter.pollCount=${waiter.r.pollCount} holder.pollCount=${holder.r.pollCount}`,
     );
     assert.equal(
       existsSync(lockPath),
@@ -3218,8 +3365,37 @@ test("startLockHeartbeat: the real sidecar keeps refreshing L.alive.<token> on a
         `sidecar must have refreshed aliveAtMs at least once (elapsed=${elapsedMs}ms)`,
       );
       heartbeat.stop();
-      await new Promise((res) => setTimeout(res, 60));
-      const afterStop = JSON.parse(readFileSync(alivePath, "utf8"));
+      // HYK-505: the old fixed `sleep 60ms -> read` assumed child.kill()
+      // takes effect within 60ms; a late kill (seam: kill delivered 250ms
+      // after stop()) left ticks inside the later 100ms window -> "no tick
+      // after stop()" red although the sidecar does die. Eventually-settled
+      // instead: wait (generous cap, reason on failure) until the alive
+      // file stops changing across a quiet window of 3 x the 30ms tick
+      // interval -- a sidecar that is truly never stopped keeps changing it
+      // and fails here with a reason; the final no-tick comparison below is
+      // unchanged.
+      const settleStartMs = Date.now();
+      let afterStop = null;
+      while (
+        Date.now() - settleStartMs <
+        GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS
+      ) {
+        try {
+          const before = JSON.parse(readFileSync(alivePath, "utf8"));
+          await new Promise((res) => setTimeout(res, 90));
+          const later = JSON.parse(readFileSync(alivePath, "utf8"));
+          if (before.aliveAtMs === later.aliveAtMs) {
+            afterStop = later;
+            break;
+          }
+        } catch {
+          // mid tmp-write-then-rename -- retry.
+        }
+      }
+      assert.ok(
+        afterStop,
+        `the sidecar never stopped refreshing after stop() (settle cap ${GENEROUS_EVENTUAL_ACQUIRE_TIMEOUT_MS}ms, elapsed=${Date.now() - settleStartMs}ms)`,
+      );
       await new Promise((res) => setTimeout(res, 100));
       const afterMore = JSON.parse(readFileSync(alivePath, "utf8"));
       assert.equal(

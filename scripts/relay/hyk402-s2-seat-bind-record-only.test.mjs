@@ -6,6 +6,7 @@ import {
   rmSync,
   writeFileSync,
   readFileSync,
+  readdirSync,
   existsSync,
   mkdirSync,
 } from "node:fs";
@@ -221,7 +222,11 @@ test("영수증 기록: 알 수 없는 판정값 · 빈 값 · 값 누락 · 소
     );
     assert.equal(noValue.exitCode, 0);
     assert.equal(noValue.row.seat_bind_verdict, "ERROR");
-    assert.equal(noValue.row.seat_bind_reason, "R1");
+    // ⓔ(S2 후속 정리): 판정값 누락으로 ERROR 가 된 칸의 사유는 «누락 사유 + 받은 사유» 로 함께 남는다.
+    assert.equal(
+      noValue.row.seat_bind_reason,
+      "SEAT_BIND_VERDICT_MISSING;given=R1",
+    );
 
     const reasonOnly = runReceipt(dir, ["--seat-bind-reason", "ONLY_REASON"], {
       receiptName: "w4.jsonl",
@@ -234,6 +239,104 @@ test("영수증 기록: 알 수 없는 판정값 · 빈 값 · 값 누락 · 소
     });
     assert.equal(eq.exitCode, 0);
     assert.equal(eq.row.seat_bind_verdict, "UNDECIDABLE");
+  });
+});
+
+// ⓒ (S2 후속 정리): 값이 `--` 로 시작해도 «기록만» 인자는 영수증을 거부하지 않는다.
+test("영수증 기록: 값이 `--` 로 시작해도 거부 0 -- 알려진 플래그 이름이 아니면 «값» 이다 · 알려진 플래그 이름이면 값 누락으로 접는다", () => {
+  withTempDir((dir) => {
+    const odd = runReceipt(
+      dir,
+      [
+        "--seat-bind-verdict",
+        "ERROR",
+        "--seat-bind-reason",
+        "--odd-reason",
+        "--seat-bind-candidates",
+        "--odd-cand",
+      ],
+      { receiptName: "c1.jsonl" },
+    );
+    assert.equal(odd.exitCode, 0, `exit=${odd.exitCode} out=${odd.stdout}`);
+    assert.equal(odd.row.seat_bind_verdict, "ERROR");
+    assert.equal(odd.row.seat_bind_reason, "--odd-reason");
+    assert.equal(odd.row.seat_bind_candidates, "--odd-cand");
+
+    // 판정값 자리에 `--` 값 -> 알 수 없는 판정값(ERROR)으로 기록 · 거부 0
+    const oddVerdict = runReceipt(dir, ["--seat-bind-verdict", "--MAYBE"], {
+      receiptName: "c2.jsonl",
+    });
+    assert.equal(oddVerdict.exitCode, 0, oddVerdict.stdout);
+    assert.equal(oddVerdict.row.seat_bind_verdict, "ERROR");
+    assert.match(
+      oddVerdict.row.seat_bind_reason,
+      /UNRECOGNIZED_VERDICT_--MAYBE/,
+    );
+
+    // 알려진 플래그 이름(`--seat-bind-verdict`)은 값이 아니라 «다음 인자» -- 앞 인자는 값 누락(빈 값)
+    const known = runReceipt(
+      dir,
+      ["--seat-bind-reason", "--seat-bind-verdict", "MATCH"],
+      { receiptName: "c3.jsonl" },
+    );
+    assert.equal(known.exitCode, 0, known.stdout);
+    assert.equal(known.row.seat_bind_verdict, "MATCH");
+    assert.equal(known.row.seat_bind_reason, undefined);
+
+    // 이 예외는 «기록만» 인자에만 -- 다른 모르는 플래그는 여전히 거부(기존 계약 무변)
+    const stray = runReceipt(dir, ["--no-such-flag"], {
+      receiptName: "c4.jsonl",
+    });
+    assert.equal(stray.exitCode, 1);
+    assert.equal(stray.text, "");
+  });
+});
+
+// ⓔ (S2 후속 정리): 판정값이 인식되지 않아 ERROR 가 된 칸에 호출자의 사유 인자가 «겹쳐» 와도
+// ERROR 의 원인 사유가 사라지지 않는다(예전: 호출자 사유가 이겨서 ERROR/ROLE_MATCH 같은 거짓 조합).
+test("영수증 기록: 인식 불가 판정값(ERROR) 칸에 사유 인자가 겹쳐도 ERROR 원인이 남는다 -- 받은 사유는 ;given= 뒤에 보존 · 120자 상한", () => {
+  withTempDir((dir) => {
+    const both = runReceipt(
+      dir,
+      ["--seat-bind-verdict", "MAYBE", "--seat-bind-reason", "ROLE_MATCH"],
+      { receiptName: "e1.jsonl" },
+    );
+    assert.equal(both.exitCode, 0, both.stdout);
+    assert.equal(both.row.seat_bind_verdict, "ERROR");
+    assert.match(both.row.seat_bind_reason, /^UNRECOGNIZED_VERDICT_MAYBE/);
+    assert.match(both.row.seat_bind_reason, /given=ROLE_MATCH/);
+    assert.notEqual(both.row.seat_bind_reason, "ROLE_MATCH");
+
+    const missing = runReceipt(dir, ["--seat-bind-reason", "ONLY_REASON"], {
+      receiptName: "e2.jsonl",
+    });
+    assert.equal(missing.row.seat_bind_verdict, "ERROR");
+    assert.match(missing.row.seat_bind_reason, /^SEAT_BIND_VERDICT_MISSING/);
+    assert.match(missing.row.seat_bind_reason, /given=ONLY_REASON/);
+
+    const long = runReceipt(
+      dir,
+      ["--seat-bind-verdict", "MAYBE", "--seat-bind-reason", "X".repeat(300)],
+      { receiptName: "e3.jsonl" },
+    );
+    assert.ok(
+      long.row.seat_bind_reason.length <= 120,
+      long.row.seat_bind_reason,
+    );
+    assert.match(long.row.seat_bind_reason, /^UNRECOGNIZED_VERDICT_MAYBE/);
+
+    // 인식되는 판정값이면 받은 사유가 그대로(겹침 없음 · 기존 계약 무변)
+    const fine = runReceipt(
+      dir,
+      [
+        "--seat-bind-verdict",
+        "ERROR",
+        "--seat-bind-reason",
+        "BIND_CLI_TIMEOUT",
+      ],
+      { receiptName: "e4.jsonl" },
+    );
+    assert.equal(fine.row.seat_bind_reason, "BIND_CLI_TIMEOUT");
   });
 });
 
@@ -409,6 +512,66 @@ test("record-only: 등록이 배달보다 «늦다» = UNDECIDABLE (일치로 �
   });
 });
 
+// ⓓ (S2 후속 정리): «등록 시각을 읽을 수 없다» 와 «등록이 배달보다 늦다» 는 다른 사유 코드다.
+// 판정은 둘 다 UNDECIDABLE 그대로(판정 4종 의미 무변).
+test("record-only: 등록 시각 해석 불가 ≠ 등록이 배달보다 늦음 -- 둘 다 UNDECIDABLE · 사유 코드만 갈린다", () => {
+  withTempDir((dir) => {
+    const run = (records) =>
+      runRecordOnly(
+        baseArgs(dir, {
+          terminals: [SEAT_CODER],
+          records,
+          handle: "term_coder",
+        }),
+      );
+    const unreadableText = run([
+      regRecord("tabA:leafA", "CODER", "not-a-date"),
+    ]);
+    const noField = run([{ ...REG_CODER, launchedAt: undefined }]);
+    const later = run([
+      regRecord("tabA:leafA", "CODER", "2026-11-18T07:40:00.000Z"),
+    ]);
+    for (const [name, r] of [
+      ["시각 문자열 불량", unreadableText],
+      ["launchedAt 칸 없음", noField],
+      ["등록이 늦음", later],
+    ]) {
+      assert.equal(r.exitCode, 0, name);
+      assert.equal(r.json.verdict, "UNDECIDABLE", name);
+    }
+    assert.equal(unreadableText.json.reason, "PANE_LAUNCHED_AT_UNREADABLE");
+    assert.equal(noField.json.reason, "PANE_LAUNCHED_AT_UNREADABLE");
+    assert.equal(later.json.reason, "PANE_REGISTERED_AFTER_DELIVERY");
+
+    // 섞인 경우: 읽을 수 있는 «늦은» 등록이 하나라도 있으면 «늦음» · 읽을 수 있는 «앞선» 등록이 있으면 MATCH.
+    const mixedLater = run([
+      regRecord("tabA:leafA", "CODER", "not-a-date"),
+      regRecord("tabA:leafA", "CODER", "2026-11-18T07:40:00.000Z"),
+    ]);
+    assert.equal(mixedLater.json.verdict, "UNDECIDABLE");
+    assert.equal(mixedLater.json.reason, "PANE_REGISTERED_AFTER_DELIVERY");
+    const mixedEarly = run([
+      regRecord("tabA:leafA", "CODER", "not-a-date"),
+      regRecord("tabA:leafA", "CODER", "2026-11-18T07:30:00.000Z"),
+    ]);
+    assert.equal(mixedEarly.json.verdict, "MATCH");
+  });
+});
+
+test("지난 자료 집계(S1)는 시각 불량 등록의 사유 문자열을 바꾸지 않는다 (ⓓ 가 집계로 번지지 않았다는 무회귀)", () => {
+  const v = classifyReceiptBinding(
+    {
+      dispatch_id: "ctx_x",
+      role: "CODER",
+      assignee_pane_key: "tabA:leafA",
+      recorded_at: "2026-11-18T07:35:35.000Z",
+    },
+    [regRecord("tabA:leafA", "CODER", "not-a-date")],
+  );
+  assert.equal(v.verdict, "UNDECIDABLE");
+  assert.equal(v.reason, "PANE_NOT_REGISTERED_AT_DISPATCH");
+});
+
 test("record-only: 등록부에 그 pane 이 없다 = UNDECIDABLE PANE_NOT_IN_REGISTRY", () => {
   withTempDir((dir) => {
     const r = runRecordOnly(
@@ -503,34 +666,67 @@ test("record-only 없이(S1 모드) 같은 오류 입력은 여전히 비0 -- S1
   assert.ok(!(r.stdout ?? "").includes('{"seat_bind"'));
 });
 
-test("판정 불가는 일치로 접히지 않는다 -- 후보 형태별 전수 (MATCH 가 아닌 것만 모아 대조)", () => {
+// 제목 정정(S2 후속 정리): 예전 제목은 «전수» 라고 했지만 3모양뿐이었다. 지금은 열거한 «5모양»만
+// 주장하고(전수가 아니다 -- 후보 형태 전체 목록이 아니다), 빠져 있던 두 모양(등록은 있으나 화면이
+// 셸 프롬프트인 좌석 · 이 워크트리에 좌석이 없음)을 «추가»했다. 단언도 «MATCH 아님» 에서
+// «UNDECIDABLE + 그 사유» 로 좁혔다.
+test("판정 불가는 일치로 접히지 않는다 -- 열거한 5가지 후보 모양(전수 아님)이 전부 UNDECIDABLE · 사유까지 값으로 고정", () => {
+  const SEAT_DEAD_REGISTERED = seat(
+    "term_dead",
+    "tabA",
+    "leafA",
+    BLANK_SHELL_PREVIEW,
+  );
   const shapes = [
     {
-      name: "미등록 에이전트처럼 보이는 좌석",
+      name: "미등록 에이전트처럼 보이는 좌석 (등록부 공백)",
       terminals: [SEAT_CODER],
       records: [],
+      handle: "term_coder",
+      reason: "REGISTRY_EMPTY",
     },
     {
       name: "등록부에 없는 pane",
       terminals: [SEAT_CODER],
       records: [REG_REVIEW],
+      handle: "term_coder",
+      reason: "PANE_NOT_IN_REGISTRY",
     },
     {
       name: "빈 셸만",
       terminals: [SEAT_BLANK],
       records: [REG_CODER],
+      handle: "term_blank",
+      reason: "PANE_NOT_IN_REGISTRY",
+    },
+    {
+      name: "등록은 있으나 화면이 셸 프롬프트인 좌석 (죽은 좌석)",
+      terminals: [SEAT_DEAD_REGISTERED],
+      records: [REG_CODER],
+      handle: "term_dead",
+      reason: "HANDLE_SEAT_NOT_LIVE_AGENT",
+    },
+    {
+      name: "이 워크트리에 좌석이 없음",
+      terminals: [],
+      records: [REG_CODER],
+      handle: "term_coder",
+      reason: "NO_SEAT_IN_WORKTREE",
     },
   ];
+  assert.equal(shapes.length, 5);
   for (const s of shapes) {
     const d = decideSeatBindAtDelivery({
       terminals: s.terminals,
       worktree: WORKTREE,
       role: "CODER",
       registryRecords: s.records,
-      handle: s.terminals[0].handle,
+      handle: s.handle,
       deliveredAtMs: DELIVERED_MS,
     });
     assert.notEqual(d.verdict, DELIVERY_BIND_VERDICT.MATCH, s.name);
+    assert.equal(d.verdict, DELIVERY_BIND_VERDICT.UNDECIDABLE, s.name);
+    assert.equal(d.reason, s.reason, s.name);
   }
 });
 
@@ -785,7 +981,7 @@ function runBlockAChild(
   blocks,
   dir,
   worktree,
-  { stripTempEnv = false } = {},
+  { stripTempEnv = false, tempSeamDir = null, failDelete = false } = {},
 ) {
   // 배달기와 같은 전제: terminal list 의 좌석 worktreePath 가 $Worktree 와 같다.
   const terminals = {
@@ -795,6 +991,16 @@ function runBlockAChild(
   const script = [
     stripTempEnv
       ? "foreach ($n in 'TEMP','TMP','TMPDIR') { Remove-Item -LiteralPath \"Env:$n\" -ErrorAction SilentlyContinue }"
+      : "",
+    // 임시 폴더 seam: 자식 pwsh «안»에서만 세 변수를 합성 폴더로 돌린다(Windows = TMP/TEMP ·
+    // Linux = TMPDIR 을 .NET 이 읽는다 -- 세 변수를 다 맞춰 플랫폼 가정을 두지 않는다).
+    tempSeamDir
+      ? `$env:TEMP='${tempSeamDir.replace(/'/g, "''")}'; $env:TMP='${tempSeamDir.replace(/'/g, "''")}'; $env:TMPDIR='${tempSeamDir.replace(/'/g, "''")}'`
+      : "",
+    // 삭제 실패 seam: 함수는 cmdlet 보다 먼저 해석된다 -- 블록 A 의 Remove-Item 호출이 «종료 오류»로 실패한다.
+    // (위의 변수 정리 줄이 이미 지나간 뒤에 정의한다.)
+    failDelete
+      ? 'function Remove-Item { [CmdletBinding()] param([string]$LiteralPath, [switch]$Force) throw "synthetic delete failure" }'
       : "",
     `$Task='task_synth'; $Worktree='${worktree.replace(/'/g, "''")}'; $Role='CODER'; $handle='term_coder'`,
     `$PSScriptRoot_override='${dir.replace(/'/g, "''")}'`,
@@ -887,6 +1093,76 @@ test("합성 ps1 사본 · 임시 폴더 환경 변수(TEMP · TMP · TMPDIR)가
       /RESULT verdict=UNDECIDABLE reason=SEAT_BIND_CLI_MISSING/,
     );
     assert.match(noCli.stdout, /CONTINUED/);
+  });
+});
+
+// ---- S2 후속 정리 (HYK-402-s2-cleanup-1): 블록 A 가 임시 목록 파일을 «남기지 않는다» ----
+// 임시 폴더를 합성 폴더로 돌려(tempSeamDir) 블록 A 실행 뒤 그 폴더를 «직접» 본다.
+// 두 칸은 짝이다: 삭제 실패 seam 칸이 «파일이 그 폴더에 실제로 써진다»를 증명하므로
+// 정상 칸의 «없음» 이 «애초에 안 썼다» 로 비는 헛시험이 되지 않는다.
+const SEAT_BIND_TEMP_LIST_NAME =
+  "hyk402-seat-bind-task_synth-terminal-list.json";
+
+function seamFiles(seamDir) {
+  return readdirSync(seamDir).filter((n) => n.startsWith("hyk402-seat-bind-"));
+}
+
+test("블록 A «실행» 뒤 임시 목록 파일이 남지 않는다 (임시 폴더를 합성 폴더로 돌린 자식 pwsh · 판정은 MATCH 그대로)", (t) => {
+  const exe = findPwsh();
+  if (!exe) {
+    t.skip(
+      "pwsh/powershell 이 이 기계에 없다 -- 실행 검증 불가(사유: 실행기 부재)",
+    );
+    return;
+  }
+  const blocks = readPatchBlocks();
+  withTempDir((dir) => {
+    writeRegistry(dir, [REG_CODER], "seat-launch-registry.jsonl");
+    const seam = join(dir, "seam-tmp");
+    mkdirSync(seam);
+    const r = runBlockAChild(exe, blocks, dir, REPO_ROOT, {
+      tempSeamDir: seam,
+    });
+    assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+    assert.match(r.stdout, /RESULT verdict=MATCH reason=ROLE_MATCH/);
+    assert.match(r.stdout, /CONTINUED/);
+    assert.deepEqual(
+      seamFiles(seam),
+      [],
+      `임시 목록 파일이 남았다: ${seamFiles(seam).join(",")}`,
+    );
+    assert.ok(!r.stdout.includes("TEMP_LIST_DELETE_FAILED"), r.stdout);
+  });
+});
+
+test("블록 A «실행» · 임시 목록 파일 삭제가 실패해도 배달은 무정지 -- 판정 그대로 · 기록만 · CONTINUED (삭제 실패 seam)", (t) => {
+  const exe = findPwsh();
+  if (!exe) {
+    t.skip(
+      "pwsh/powershell 이 이 기계에 없다 -- 실행 검증 불가(사유: 실행기 부재)",
+    );
+    return;
+  }
+  const blocks = readPatchBlocks();
+  withTempDir((dir) => {
+    writeRegistry(dir, [REG_CODER], "seat-launch-registry.jsonl");
+    const seam = join(dir, "seam-tmp");
+    mkdirSync(seam);
+    const r = runBlockAChild(exe, blocks, dir, REPO_ROOT, {
+      tempSeamDir: seam,
+      failDelete: true,
+    });
+    assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+    // 삭제 실패는 판정을 덮어쓰지 않는다(BIND_CALL_FAILED 로 떨어지면 안 된다).
+    assert.match(r.stdout, /RESULT verdict=MATCH reason=ROLE_MATCH/);
+    assert.ok(!/BIND_CALL_FAILED/.test(r.stdout), r.stdout);
+    assert.match(r.stdout, /TEMP_LIST_DELETE_FAILED/);
+    assert.match(r.stdout, /CONTINUED/);
+    // seam 이 «진짜로 파일이 써진 폴더»임을 확인 -- 위 정상 칸의 «없음» 이 헛시험이 아니라는 짝 증거.
+    assert.ok(
+      existsSync(join(seam, SEAT_BIND_TEMP_LIST_NAME)),
+      "삭제 실패 seam 에서 파일이 seam 폴더에 있어야 한다(없으면 정상 칸의 «없음» 이 헛시험)",
+    );
   });
 });
 
