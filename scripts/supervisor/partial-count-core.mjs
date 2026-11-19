@@ -394,18 +394,43 @@ function renderUndecidableWithReasons(gate4) {
   return `UNDECIDABLE ${gate4.undecidable}(사유: ${dist})`;
 }
 
+// HYK-255-c1-approval-cache-1 -- ㄱ-4 판정 캐시를 켠 회차(gate4.cache.active)의 ㄱ-4 줄 앞머리. «캐시 포함 확인 N» 은 이번 회차에 판정을
+// 쥔 후보 수(이번 회차 조회 M + 캐시 재사용 R)이고 «이번 회차 조회 M» 은 실제 REST 로 새로 본 건수다 -- 캐시에서 온 값을 새로 본 값처럼
+// 적지 않는다(M 과 R 을 따로 적는다). 캐시 없는 회차(gate4.cache 없음)는 옛 문면 그대로다.
+function renderGate4HeadCounts(gate4) {
+  if (gate4.cache?.active !== true) return `중 조회 ${gate4.checked}건`;
+  const confirmed = gate4.checked + gate4.cache.reused;
+  return `중 캐시 포함 확인 ${confirmed} · 이번 회차 조회 ${gate4.checked}`;
+}
+
+function buildGate4CacheLines(gate4) {
+  const c = gate4.cache;
+  if (c?.active !== true) return [];
+  const lines = [];
+  if (c.reused > 0) {
+    lines.push(
+      `  · 캐시 재사용: APPROVED ${c.reusedApproved} · NOT_APPROVED ${c.reusedNotApproved} · UNDECIDABLE ${c.reusedUndecidable}` +
+        ` — 이전 회차에 저장된 판정(이번 회차 조회 아님 · 캐시는 독립 앵커가 아니다)`,
+    );
+  }
+  if (c.notes?.length > 0) lines.push(`  · 캐시 상태: ${c.notes.join(" · ")}`);
+  return lines;
+}
+
 function buildGaSection(gate4, auxNote, gateAux) {
   const lines = ["ㄱ 설계된 정지:"];
   if (gate4.known === true) {
     lines.push(`- 외부 독립 앵커로 확인: ${gate4.approved}건`);
     lines.push(
       `- ㄱ-4 후보 병합(측정 기간 내 origin/master): ${gate4.candidatesInWindow}건` +
-        ` 중 조회 ${gate4.checked}건 · APPROVED ${gate4.approved} · NOT_APPROVED ${gate4.notApproved}` +
+        ` ${renderGate4HeadCounts(gate4)} · APPROVED ${gate4.approved} · NOT_APPROVED ${gate4.notApproved}` +
         ` · ${renderUndecidableWithReasons(gate4)} · 미조회(예산) ${gate4.uncheckedByBudget}건 — 미조회는 미계수다`,
     );
+    lines.push(...buildGate4CacheLines(gate4));
     for (const ev of gate4.approvedEvents ?? []) {
+      const cacheMark = ev.fromCache === true ? " · 캐시 재사용" : "";
       lines.push(
-        `  · 확인 사건: ${ev.sha.slice(0, 7)} PR#${ev.pullNumber} 승인자 ${ev.reviewerLogin} (승인+병합 결속 1사건)`,
+        `  · 확인 사건: ${ev.sha.slice(0, 7)} PR#${ev.pullNumber} 승인자 ${ev.reviewerLogin} (승인+병합 결속 1사건${cacheMark})`,
       );
     }
   } else {
