@@ -773,6 +773,20 @@
       "self_registration_note": "HYK-389-shim-core-1 self-registration (OBSERVER convention, same as skip-review-usage above). HYK-389 slice 1 of 5 (owner ruling 2026-11-18 08:05, item 4: record first). Honesty: install_targets is EMPTY on purpose -- nothing places this shim on any seat's PATH yet (the install-copy of the two .mjs files changes nothing unless a PATH dir holds an `orca` shim; the ORCH launcher wiring is slice 2), so today no live seat's behavior is different. Not an anchor. See docs/enforcement-known-gaps.md gap#102 for the seven bypasses."
     },
     {
+      "id": "usage-threshold-watch",
+      "substrate": "manual",
+      "script": "scripts/supervisor/usage-threshold-wire.mjs",
+      "test": "scripts/supervisor/usage-threshold-watch.test.mjs",
+      "install_targets": [],
+      "expected_bad": "n/a -- this is an OBSERVER, not a gate and not an anchor. It never blocks a dispatch, commit, PR, or CI run. Each scheduled watch cycle (watch-run.mjs) reads the status-line usage files the HUD already writes (`<HUD dir>/ratelimit-<role>.json`: ctx, five_hour, seven_day, at) and, only when a band is ENTERED, writes ONE notice file into the existing notify inbox (first line = a one-line human conclusion): ORCH ctx 65 and 75, weekly 90 and 95, ORCH file older than 60 minutes (STALE; the notice says so when a role-less seat file (NOROLE) is newer), or unreadable (missing / broken JSON / null field -- reported as OBSERVATION-UNAVAILABLE, never folded to 0%). The same band repeated writes nothing; a band that falls back resets state without a notice; five_hour is recorded only.",
+      "expected_good": "n/a -- run through the production cycle (`runWatchOnce` with `usageThreshold: {hudDir}` and a notifyDir; the CLI turns it on by default, `--no-usage-threshold` turns it off, `--usage-hud-dir` overrides the HUD directory) with synthetic HUD / watch / inbox directories: ORCH ctx 66 + weekly 91 -> one notice; the same sample again -> zero; at 61 minutes ago -> one STALE notice; seven_day null -> one unavailable notice, not 0%; broken JSON -> unavailable notice and the cycle survives.",
+      "failure_exit": null,
+      "uncertain_exit": null,
+      "owner": "ORCH",
+      "claude_only": false,
+      "self_registration_note": "HYK-406-usage-watch-1 self-registration (OBSERVER convention, same as skip-review-usage and orca-record-shim above). HYK-406 slice A (owner ruling 2026-11-18 20:41). Honesty: install_targets is EMPTY on purpose -- the scheduled task (\\HARNESS\\OrchStallWatch) is NOT changed by this slice; the step is on by default in the watch-run CLI, so it goes live only when master is merged and the main checkout the schedule runs from is updated. NOT an anchor: the HUD files are written with the user's own permission and the ORCH can overwrite them too, so a 'normal' reading is not proof that the ORCH is fine. Detection lags by up to the 15-minute schedule plus the HUD refresh (the HUD only refreshes while a seat is active); two seats of the same role overwrite the same file; if the vendor drops a field the result is 'unavailable', not 0%; an ORCH launched without HARNESS_ROLE writes ratelimit-NOROLE.json and silently ages the ORCH file (the STALE notice says so). Not north-star distance (counter HYK-255): this is the non-stop axis. See docs/enforcement-known-gaps.md gap#103."
+    },
+    {
       "id": "orch-seat-boot-observer",
       "substrate": "manual",
       "script": "scripts/relay/orch-seat-boot.mjs",
