@@ -124,9 +124,11 @@ export function paneKeyOf(seat) {
 // 등록부는 append-only 라 같은 pane key 가 여러 번 나올 수 있다(재기동).
 // asOfMs 가 없으면 «지금 기준 마지막 등록», 있으면 «그 시각 이전(포함)에 한
 // 마지막 등록»(과거 영수증 집계용). launchedAt 이 읽히지 않는 줄은 asOf 모드에서
-// 시각을 매길 수 없으므로 후보에서 뺀다.
+// 시각을 매길 수 없으므로 후보에서 뺀다. 후보가 비었을 때 «읽을 수 있는 등록 시각이 하나라도
+// 있으나 전부 asOf 뒤»면 NOT_YET_REGISTERED(등록이 늦음), «읽을 수 있는 시각이 하나도 없음»이면
+// LAUNCHED_AT_UNREADABLE(시각 해석 불가) -- 두 원인을 갈라 둔다(S2 후속 정리 ⓓ).
 // -> { status: "FOUND", role } | { status: "NOT_IN_REGISTRY" |
-//      "NOT_YET_REGISTERED" | "ROLE_MISSING" }
+//      "NOT_YET_REGISTERED" | "LAUNCHED_AT_UNREADABLE" | "ROLE_MISSING" }
 export function lookupRegisteredRole(records, paneKey, { asOfMs } = {}) {
   const own = (Array.isArray(records) ? records : []).filter(
     (r) =>
@@ -135,12 +137,20 @@ export function lookupRegisteredRole(records, paneKey, { asOfMs } = {}) {
   if (own.length === 0) return { status: "NOT_IN_REGISTRY" };
   let eligible = own;
   if (Number.isFinite(asOfMs)) {
-    eligible = own
-      .map((r, index) => ({ r, index, t: Date.parse(r.launchedAt) }))
+    const timed = own.map((r, index) => ({
+      r,
+      index,
+      t: Date.parse(r.launchedAt),
+    }));
+    eligible = timed
       .filter((x) => Number.isFinite(x.t) && x.t <= asOfMs)
       .sort((a, b) => a.t - b.t || a.index - b.index)
       .map((x) => x.r);
-    if (eligible.length === 0) return { status: "NOT_YET_REGISTERED" };
+    if (eligible.length === 0) {
+      return timed.some((x) => Number.isFinite(x.t))
+        ? { status: "NOT_YET_REGISTERED" }
+        : { status: "LAUNCHED_AT_UNREADABLE" };
+    }
   }
   const role = normalizeRole(eligible[eligible.length - 1].role);
   if (role === "") return { status: "ROLE_MISSING" };
@@ -361,7 +371,7 @@ export function selectRoleBoundSeat({
 //               좌석이 한 워크트리에 둘 이상이다(MULTI_AGENT_SEAT_IN_WORKTREE --
 //               «역할은 맞을 수 있으나 불변식이 깨졌다»; 사유 칸으로 가른다).
 //   UNDECIDABLE 판정할 근거가 없다: 등록부 공백 · 등록부 없음 · 그 pane 이 등록부에
-//               없음 · 등록이 배달보다 «늦다» · 에이전트 좌석 없음 · 미등록 에이전트
+//               없음 · 등록이 배달보다 «늦다»(또는 등록 시각을 읽을 수 없다 -- 사유 코드가 갈린다) · 에이전트 좌석 없음 · 미등록 에이전트
 //               좌석 · 죽은 셸. ⛔MATCH 로 접지 않는다(거부도 아니다).
 //   ERROR       입력이 깨졌다: 알 수 없는 역할 · 워크트리 비어 있음 · terminal list
 //               해석 불가 · 등록부 읽기 오류 · 매핑에 없는 거부 사유.
@@ -426,6 +436,8 @@ function refineUndecidableReason({
   });
   if (found.status === "NOT_YET_REGISTERED")
     return "PANE_REGISTERED_AFTER_DELIVERY";
+  if (found.status === "LAUNCHED_AT_UNREADABLE")
+    return "PANE_LAUNCHED_AT_UNREADABLE";
   if (found.status === "NOT_IN_REGISTRY") return "PANE_NOT_IN_REGISTRY";
   return selectReason;
 }
@@ -539,7 +551,11 @@ export function classifyReceiptBinding(receipt, registryRecords) {
   });
   if (found.status === "NOT_IN_REGISTRY")
     return undecidable("PANE_NOT_IN_REGISTRY");
-  if (found.status === "NOT_YET_REGISTERED") {
+  // 지난 자료 집계(S1)는 «시각 해석 불가» 도 예전과 같은 사유 문자열로 둔다(ⓓ 는 배달 순간 판정의 분리 · 집계 무변).
+  if (
+    found.status === "NOT_YET_REGISTERED" ||
+    found.status === "LAUNCHED_AT_UNREADABLE"
+  ) {
     return undecidable("PANE_NOT_REGISTERED_AT_DISPATCH");
   }
   if (found.status !== "FOUND") return undecidable("REGISTRY_ROLE_MISSING");

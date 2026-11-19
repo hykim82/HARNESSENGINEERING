@@ -474,3 +474,113 @@ test("통지 문면 표본 -- 첫 줄 뒤 빈 줄 · 끝에 OBSERVER 고지(앵�
     assert.ok(text.includes("앵커"));
   });
 });
+
+// ---- HYK-406-wk-gate-1: 조각 A 검토 P2-1 · P2-2 (검토 1R REVIEW-r1.md §5) ----
+
+test("P2-1 범위 밖 퍼센트(ctx 150 · -5) -> 사유는 «범위 밖» 이다 · «값이 비었다(null)» 가 아니다 · 0% 로 접지 않는다", () => {
+  for (const bad of [150, -5]) {
+    withSandbox((d) => {
+      writeHud(d.hudDir, "ORCH", { ctx: bad });
+      const r = cycle(d);
+      assert.equal(r.usageThreshold.ctx.kind, "UNOBSERVABLE", `ctx ${bad}`);
+      assert.equal(r.usageThreshold.ctx.value, undefined);
+      assert.match(r.usageThreshold.ctx.reason, /범위 밖/);
+      assert.match(r.usageThreshold.ctx.reason, new RegExp(String(bad)));
+      assert.equal(
+        r.usageThreshold.ctx.reason.includes("비었다"),
+        false,
+        "범위 밖 값을 «비었다» 라고 말하면 사유가 사실과 다르다",
+      );
+      assert.match(firstLine(notices(d)[0]), /범위 밖/);
+    });
+  }
+});
+
+test("P2-1 범위 밖이 아닌 null 은 종전 사유 그대로(«값이 비었다(null)») -- 문구를 갈라야지 지우면 안 된다", () => {
+  withSandbox((d) => {
+    writeHud(d.hudDir, "ORCH", { ctx: null });
+    const r = cycle(d);
+    assert.match(r.usageThreshold.ctx.reason, /비었다\(null\)/);
+    assert.equal(r.usageThreshold.ctx.reason.includes("범위 밖"), false);
+  });
+});
+
+test("P2-1 주간 seven_day 가 범위 밖(150)이면 관측 불가 사유에 «범위 밖» 이 실린다(0% 아님)", () => {
+  withSandbox((d) => {
+    writeHud(d.hudDir, "ORCH", { ctx: 10, seven_day: 150 });
+    const r = cycle(d);
+    assert.equal(r.usageThreshold.wk.kind, "UNOBSERVABLE");
+    assert.equal(r.usageThreshold.wk.value, undefined);
+    assert.match(r.usageThreshold.wk.reason, /범위 밖/);
+    assert.match(logText(d), /wk_band=UNOBSERVABLE wk_pct=NONE/);
+  });
+});
+
+test("P2-2 ORCH 파일만 없음(다른 역할 파일은 있음) -> ctx 관측 불가(파일 없음) · 주간은 다른 역할 파일로 관측된다", () => {
+  withSandbox((d) => {
+    writeHud(d.hudDir, "CODER", { ctx: 99, seven_day: 50 });
+    const r = cycle(d);
+    assert.equal(r.usageThreshold.ctx.kind, "UNOBSERVABLE");
+    assert.match(r.usageThreshold.ctx.reason, /파일 없음/);
+    assert.equal(r.usageThreshold.wk.kind, "OBSERVED");
+    assert.equal(r.usageThreshold.wk.value, 50);
+    assert.equal(r.usageThreshold.wk.role, "CODER");
+    // CODER 의 ctx 99 는 ORCH 판정에 섞이지 않는다.
+    assert.equal(
+      notices(d).some((t) => /하드선|교대 권장선/.test(firstLine(t))),
+      false,
+    );
+    assert.match(firstLine(notices(d)[0]), /^ORCH 컨텍스트를 읽을 수 없음/);
+  });
+});
+
+test("P2-2 at 없음 -> ORCH ctx 관측 불가(at 이 없거나 형식이 틀림) · 주간도 그 파일 값을 쓰지 않는다", () => {
+  withSandbox((d) => {
+    writeHud(d.hudDir, "ORCH", { ctx: 80, seven_day: 91, at: undefined });
+    const r = cycle(d);
+    assert.equal(r.usageThreshold.ctx.kind, "UNOBSERVABLE");
+    assert.match(
+      r.usageThreshold.ctx.reason,
+      /at\(시각\)이 없거나 형식이 틀림/,
+    );
+    assert.equal(r.usageThreshold.wk.kind, "UNOBSERVABLE");
+    assert.match(logText(d), /ctx_band=UNOBSERVABLE/);
+    assert.equal(
+      notices(d).some((t) => /하드선|접기선/.test(firstLine(t))),
+      false,
+      "at 을 믿을 수 없는 파일의 80 · 91 로 띠 통지를 내면 안 된다",
+    );
+  });
+});
+
+test("P2-2 at 이 미래(10분 뒤) -> ORCH ctx 관측 불가(미래 시각) · 주간도 그 파일을 고르지 않는다", () => {
+  withSandbox((d) => {
+    writeHud(d.hudDir, "ORCH", {
+      ctx: 80,
+      seven_day: 91,
+      at: new Date(NOW + 10 * MIN).toISOString(),
+    });
+    const r = cycle(d);
+    assert.equal(r.usageThreshold.ctx.kind, "UNOBSERVABLE");
+    assert.match(r.usageThreshold.ctx.reason, /미래 시각/);
+    assert.equal(r.usageThreshold.wk.kind, "UNOBSERVABLE");
+    assert.equal(
+      notices(d).some((t) => /하드선|접기선/.test(firstLine(t))),
+      false,
+    );
+  });
+});
+
+test('P2-2 값이 문자열(ctx "80" · seven_day "91") -> 숫자로 바꿔 읽지 않는다 · 띠 통지 0 · 관측 불가', () => {
+  withSandbox((d) => {
+    writeHud(d.hudDir, "ORCH", { ctx: "80", seven_day: "91" });
+    const r = cycle(d);
+    assert.equal(r.usageThreshold.ctx.kind, "UNOBSERVABLE");
+    assert.equal(r.usageThreshold.ctx.value, undefined);
+    assert.equal(r.usageThreshold.wk.kind, "UNOBSERVABLE");
+    assert.equal(r.usageThreshold.wk.value, undefined);
+    assert.match(logText(d), /ctx_pct=NONE wk_band=UNOBSERVABLE wk_pct=NONE/);
+    assert.equal(stateOf(d).wkBand, "OK");
+    assert.equal(stateOf(d).ctxBand, "OK");
+  });
+});
