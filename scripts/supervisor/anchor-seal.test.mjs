@@ -974,6 +974,30 @@ test("세션 typed 턴만 잎이 된다 -- typed 아닌 줄은 무시 · 같은 
   });
 });
 
+test("파일 이름은 잎에 들어가지 않는다 -- 같은 바이트의 파일 이름만 바꿔도 뿌리가 같다 · 파일 하나가 더 생기면 달라진다", async () => {
+  const seal = await loadSeal();
+  await withWorldAsync(async (w) => {
+    const srcs = sealOpts(w).sources;
+    const before = seal.computeAnchorRoots(srcs).roots;
+    fs.renameSync(
+      join(w.outboxDir, `2026-11-19-1000-${LEAK_NAME}.md`),
+      join(w.outboxDir, "2026-11-19-1000-다른이름-게이트1.md"),
+    );
+    fs.renameSync(
+      join(w.inboxDir, "2026-11-19-1520-상신1530-마커.md"),
+      join(w.inboxDir, "2026-11-19-1520-상신1530-바뀐이름.md"),
+    );
+    const renamed = seal.computeAnchorRoots(srcs).roots;
+    assert.equal(renamed.g1, before.g1, "이름이 g1 잎에 들어갔다");
+    assert.equal(renamed.g7, before.g7, "이름이 g7 잎에 들어갔다");
+    fs.writeFileSync(
+      join(w.inboxDir, "2026-11-19-1521-상신1531-추가.md"),
+      "다른 본문\n",
+    );
+    assert.notEqual(seal.computeAnchorRoots(srcs).roots.g7, before.g7);
+  });
+});
+
 test("redactSecret -- 토큰 값은 어떤 문구에서도 가려진다", async () => {
   const seal = await loadSeal();
   assert.equal(
