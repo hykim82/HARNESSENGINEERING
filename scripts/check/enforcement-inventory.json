@@ -787,6 +787,20 @@
       "self_registration_note": "HYK-406-usage-watch-1 self-registration (OBSERVER convention, same as skip-review-usage and orca-record-shim above). HYK-406 slice A (owner ruling 2026-11-18 20:41). Honesty: install_targets is EMPTY on purpose -- the scheduled task (\\HARNESS\\OrchStallWatch) is NOT changed by this slice; the step is on by default in the watch-run CLI, so it goes live only when master is merged and the main checkout the schedule runs from is updated. NOT an anchor: the HUD files are written with the user's own permission and the ORCH can overwrite them too, so a 'normal' reading is not proof that the ORCH is fine. Detection lags by up to the 15-minute schedule plus the HUD refresh (the HUD only refreshes while a seat is active); two seats of the same role overwrite the same file; if the vendor drops a field the result is 'unavailable', not 0%; an ORCH launched without HARNESS_ROLE writes ratelimit-NOROLE.json and silently ages the ORCH file (the STALE notice says so). Not north-star distance (counter HYK-255): this is the non-stop axis. See docs/enforcement-known-gaps.md gap#103."
     },
     {
+      "id": "usage-snapshot-read-cli",
+      "substrate": "manual",
+      "script": "scripts/supervisor/usage-snapshot-read-cli.mjs",
+      "test": "scripts/supervisor/usage-snapshot-read-cli.test.mjs",
+      "install_targets": [],
+      "expected_bad": "n/a -- this is an OBSERVER read tool, not a gate and not an anchor. The CLI itself never blocks anything: it only READS the status-line usage files (`<HUD dir>/ratelimit-<role>.json`, reusing the slice-A readers) and prints ONE line of JSON `{seven_day, at, ageMin, status, role, reason}` (status = ok | stale | unavailable) with exit 0 always. The blocking decision lives in the control-room memory-gate patch DOCUMENT (docs/control-room-patches/HYK-406-memory-gate-wk.md), which is PROPOSED and not applied by this slice: weekly >= -WkFold (default 90) -> `Finish CLOSED_WK_FOLD` (no new seat). An unreadable, stale, out-of-range, string-typed or missing value is reported as `unavailable`/`stale` with a reason and is NEVER folded to 0%.",
+      "expected_good": "n/a -- run as a child process against synthetic HUD directories (`--hud-dir` + `--now`): ORCH seven_day 91 one minute old -> status ok, seven_day 91; 61 minutes old -> stale; null / 150 / \"91\" (string) / broken JSON / missing directory -> unavailable with seven_day null and exit 0. The patch document's two units are applied to a synthetic memory-gate copy and run by a real PowerShell: wk 91 -> CLOSED_WK_FOLD and no seat-launch line; wk 89 -> open; wk 90 -> closed (>=); null / stale / CLI missing / CLI crash / CLI hang -> open with a `WK-GATE UNOBSERVED (fail-open)` reason line; `-WkFold 100` with wk 91 -> open.",
+      "failure_exit": null,
+      "uncertain_exit": null,
+      "owner": "ORCH",
+      "claude_only": false,
+      "self_registration_note": "HYK-406-wk-gate-1 self-registration (OBSERVER convention, same as usage-threshold-watch above). HYK-406 slice B repository share (owner ruling 2026-11-19 14:06 item 2). Honesty: install_targets is EMPTY on purpose -- applying the memory-gate patch (and so making this CLI a launch gate) is a SEPARATE submission and owner ruling; this slice only adds the read CLI and the patch document. NOT an anchor: the HUD files are written with the user's own permission and the ORCH can overwrite them too, so a low reading is not proof the weekly wallet is safe; the value is the freshest file that has one (which seat wrote it is not distinguishable); the freshness limit is 60 minutes and a stale value never closes the gate; an unobservable value OPENS the gate (fail-open, owner ruling) so a broken reader cannot stop all deliveries. The test drives a synthetic copy of the gate's anchor lines, not the real memory-gate.ps1 (measurement, Get-Counter and orca terminal create are not opened). See docs/enforcement-known-gaps.md gap#103."
+    },
+    {
       "id": "orch-seat-boot-observer",
       "substrate": "manual",
       "script": "scripts/relay/orch-seat-boot.mjs",

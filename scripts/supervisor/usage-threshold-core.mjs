@@ -75,6 +75,14 @@ export function pctOrNull(raw) {
   return raw;
 }
 
+// pctOrNull 이 null 로 접는 값 중 «유한한 숫자인데 0..100 밖» 인 것만 그 값을 돌려준다
+// (없으면 null). 사유 문구를 «값이 비었다» 와 «범위 밖» 으로 가르기 위한 판별이다 --
+// 이 값으로 판정을 바꾸지 않는다(HYK-406-wk-gate-1 · 조각 A 검토 P2-1).
+export function outOfRangePct(raw) {
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return null;
+  return raw < 0 || raw > 100 ? raw : null;
+}
+
 // 파일 한 개 -> 정규화된 표본. raw 는 파일 텍스트(읽기 실패면 null),
 // readError 는 읽기 실패 사유 토큰(없으면 null).
 export function parseSnapshot({ role, raw, readError }) {
@@ -86,6 +94,8 @@ export function parseSnapshot({ role, raw, readError }) {
     ctx: null,
     fiveHour: null,
     sevenDay: null,
+    ctxOutOfRange: null,
+    sevenDayOutOfRange: null,
   };
   if (readError) return { ...base, reason: readError };
   let parsed;
@@ -105,6 +115,8 @@ export function parseSnapshot({ role, raw, readError }) {
     ctx: pctOrNull(parsed.ctx),
     fiveHour: pctOrNull(parsed.five_hour),
     sevenDay: pctOrNull(parsed.seven_day),
+    ctxOutOfRange: outOfRangePct(parsed.ctx),
+    sevenDayOutOfRange: outOfRangePct(parsed.seven_day),
   };
 }
 
@@ -137,6 +149,13 @@ export function judgeOrchCtx({ orch, nowMs }) {
     };
   }
   if (orch.ctx === null) {
+    // 범위 밖(예: transcript 추정 경로의 100 넘는 값)은 «비었다» 가 아니다 -- 사유를 가른다.
+    if (orch.ctxOutOfRange !== null) {
+      return {
+        kind: KIND.UNOBSERVABLE,
+        reason: `ORCH 파일의 ctx 값이 범위 밖이다(0..100 아님: ${orch.ctxOutOfRange})`,
+      };
+    }
     return {
       kind: KIND.UNOBSERVABLE,
       reason: "ORCH 파일의 ctx 값이 비었다(null)",
@@ -167,9 +186,16 @@ export function judgeWeekly({ snaps, nowMs }) {
   const best = pickFreshest(snaps, "sevenDay", nowMs);
   if (best === null) {
     const readable = snaps.filter((s) => s.readable).length;
+    const outOfRange = snaps
+      .filter((s) => s.readable && s.sevenDayOutOfRange !== null)
+      .map((s) => `${s.role}=${s.sevenDayOutOfRange}`);
+    const rangeNote =
+      outOfRange.length > 0
+        ? ` · seven_day 값이 범위 밖(0..100 아님)인 파일: ${outOfRange.join(", ")}`
+        : "";
     return {
       kind: KIND.UNOBSERVABLE,
-      reason: `읽을 수 있는 파일 ${readable}개 · 파일 ${snaps.length}개 중 seven_day 값이 있는 것이 없다`,
+      reason: `읽을 수 있는 파일 ${readable}개 · 파일 ${snaps.length}개 중 seven_day 값이 있는 것이 없다${rangeNote}`,
     };
   }
   return {
