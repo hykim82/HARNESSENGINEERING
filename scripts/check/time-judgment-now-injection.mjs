@@ -25,6 +25,7 @@ export const TIME_JUDGMENT_ENTRY_POINTS = Object.freeze([
   { fn: "runSelfcheck", file: "selfcheck" },
   { fn: "runRateLimitStallOnce", file: "rate-limit-stall-wire" },
   { fn: "runUsageThresholdOnce", file: "usage-threshold-wire" },
+  { fn: "runUsageSnapshotCli", file: "usage-snapshot-read-cli" },
   { fn: "runReachOnce", file: "reach-report" },
   { fn: "runWatchOnce", file: "watch-run" },
 ]);
