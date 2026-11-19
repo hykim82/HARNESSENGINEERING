@@ -1118,6 +1118,12 @@ test("2R ⑵ 이월은 «양성 · 창 안 · 사람» 만: 창 밖 제출 · �
       r.githubHumanActions.humanEventIds.filter((id) => id.startsWith("cr:")),
       ["cr:501"],
     );
+    // 창 시작보다 오래된 기록(502)은 다시는 셀 수 없어 캐시에서 버려지고, 창 안 기록(봇 503 포함 -- 봇 판정은 세는 때)은 남는다.
+    const saved = JSON.parse(fs.readFileSync(rig.cachePath, "utf8"));
+    assert.deepEqual(
+      saved.entries[rig.repo.mergeShas[2]].changeRequests.map((x) => x.id),
+      ["501", "503"],
+    );
   } finally {
     cleanup(rig);
   }
@@ -1215,6 +1221,66 @@ test("2R ⑷ 열린 PR 은 캐시로 건너뛰지 않는다: PR_NOT_MERGED(열�
   } finally {
     cleanup(rig);
   }
+});
+
+test("2R ⑷ 열린 PR 은 조회 못 한 회차에도 캐시 판정으로 «재사용» 되지 않는다: 몫 0 회차 · 열린 PR 이 몫보다 많은 회차 -- 미조회(예산)로 남고 «열린 PR n건은 캐시로 건너뛰지 않음» 줄이 찍힌다", async () => {
+  const rig = makeRig(3);
+  try {
+    const [s1, s2] = rig.repo.mergeShas;
+    rig.fetch.behavior[s1] = "openpr";
+    rig.fetch.behavior[s2] = "openpr";
+    await cycle(rig, 0); // s3 APPROVED
+    await cycle(rig, 1); // s2 열림 -> UNDECIDABLE(PR_NOT_MERGED) 저장
+    await cycle(rig, 2); // 열린 s2 가 먼저 다시 조회됨(s1 은 미조회)
+    const parsed = JSON.parse(fs.readFileSync(rig.cachePath, "utf8"));
+    assert.equal(parsed.entries[s2].reason, "PR_NOT_MERGED", "캐시 항목 표본");
+    // 몫 0: 아무것도 조회 못 한다 -- 캐시에 있는 열린 s2 는 판정으로 재사용되지 않고, 닫힌 s3 만 재사용된다.
+    const mark = rig.fetch.calls.pullsFor.length;
+    const r0 = await cycle(rig, 3, { maxMergeChecks: 0 });
+    assert.equal(rig.fetch.calls.pullsFor.length, mark, "몫 0 = 조회 0");
+    assert.equal(r0.gate4.cache.reusedUndecidable, 0);
+    assert.equal(r0.gate4.undecidable, 0, "열린 PR 판정을 캐시로 세지 않는다");
+    assert.equal(r0.gate4.uncheckedByBudget, 2, "열린 s2 · 새 s1 모두 미조회");
+    assert.equal(r0.gate4.cache.openPrNotReused, 1);
+    assert.match(r0.reportText, /열린 PR 1건은 캐시로 건너뛰지 않음/);
+    // 열린 PR 이 둘이고 몫이 1: 몫 밖 열린 PR 도 재사용되지 않는다.
+    rig.fetch.behavior[s1] = "openpr";
+    await cycle(rig, 4); // 열린 둘 중 하나 조회(캐시에 s1 이 없던 터라 s1 이 새 sha 로 먼저)
+    const r5 = await cycle(rig, 5);
+    assert.equal(r5.gate4.cache.reusedUndecidable, 0);
+    assert.equal(r5.gate4.undecidable, 1, "이번 회차 조회한 열린 PR 1건만");
+  } finally {
+    cleanup(rig);
+  }
+});
+
+test("2R ⑵ 코어 직접: 이월 기록도 이번 회차 응답과 같은 규칙으로 센다 -- 창 시작 전 · 창 끝 뒤 · 봇 · 같은 id 중복은 세지 않는다", () => {
+  const start = NOW - 24 * HOUR;
+  const base = {
+    reviewLists: [],
+    botLogins: new Set(["bot-fixture-a"]),
+    windowStartMs: start,
+    windowEndMs: NOW,
+  };
+  const rec = (id, login, atMs) => ({ id, login, atMs });
+  const out = core.summarizeChangeRequests({
+    ...base,
+    carriedRecords: [
+      rec("1", "human-rev", start - 1), // 창 시작 전
+      rec("2", "human-rev", NOW + 1), // 창 끝 뒤
+      rec("3", "bot-fixture-a", NOW - HOUR), // 봇
+      rec("4", "human-rev", start), // 창 경계 = 안
+      rec("4", "other-human", NOW - HOUR), // 같은 id 중복
+      { id: "", login: "human-rev", atMs: NOW - HOUR }, // 모양 틀림
+    ],
+  });
+  assert.equal(out.count, 1);
+  assert.equal(out.carried, 1);
+  assert.equal(out.fresh, 0);
+  assert.deepEqual(
+    out.events.map((e) => e.id),
+    ["cr:4"],
+  );
 });
 
 test("2R ⑸ 일별 줄 합집합이 회차 1 사건을 잃지 않는다: 회차 4 에서 후보 수집이 실패해(그 회차 변경 요청 판독 재료 0) 사건이 안 보여도 오늘 합집합 · 사건 시각 장부에 cr 사건이 남고, 켬 = 끔", async () => {
