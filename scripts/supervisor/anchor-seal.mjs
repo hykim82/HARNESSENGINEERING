@@ -15,10 +15,16 @@
 //  잎(leaf)  = sha256( "hyk255-anchor-seal/v1" 0x00 유형키 0x00 바이트길이(10진 ASCII)
 //                      0x00 바이트 )
 //  바이트    = «파일 전체 바이트»(보내는함 · 받는함 · 원장 · 체인 · 북극성 파일) 또는
-//              «정규 JSON 한 줄 {"sessionId":<UUID>,"ts":<타임스탬프>}»(세션 typed 턴).
+//              «정규 JSON 한 줄 {"sessionId":<UUID>,"ts":<타임스탬프>,"body":<64hex>}»
+//              (세션 typed 턴 · v1 2R). body = 그 세션 jsonl 줄의 «원문 바이트» 의 sha256(hex)
+//              -- 줄 끝 `\n` 앞까지가 해시 입력이다(`\r` 은 줄 바이트로 센다 · 마지막 줄에
+//              개행이 없어도 같다 · 디코드 뒤 문자열이 아니라 바이트). ⛔원문 자체는 잎 ·
+//              상태 파일 · 원격 · 로그 어디에도 넣지 않는다 -- 본문 해시만 잎에 들어간다.
 //  ⛔시각 · 건수 · 이름처럼 «짧고 추측 가능한 값 하나만» 으로 잎을 만들지 않는다 --
 //    잎 입력에는 파일 전체 본문 또는 UUID(122비트 이상 무작위)가 항상 들어 있다.
 //    (본문이 짧고 뻔한 파일은 이 보장이 약하다 -- 정직 한계 8.)
+//  ⛔본문 없는 잎(있었다는 사실만 · 열쇠 sessionId·ts 만)은 봉인 등급으로 세지 않는다 --
+//    typed 턴 잎은 반드시 본문 해시를 포함한다(뺀 변이는 시험이 빨강으로 잡는다).
 //  유형 뿌리 = 잎(32바이트)을 «바이트 순» 정렬 -> 두 개씩 sha256( 0x01 ‖ 왼 ‖ 오 ) ->
 //              홀수 개면 마지막 하나를 그대로 위로 올림 -> 하나 남을 때까지 반복.
 //  잎 0개    = 뿌리 없음 -> 낱말 `none`(빈 뿌리 · 0 으로 접지 않는다).
@@ -36,14 +42,35 @@
 //  g6 = g2 와 같은 원천(유형 키만 g6)
 //  g7 = 보내는함 `*.md` 중 이름에 «판정-HHMM»/«상신HHMM» 짝 토큰(partial-count-
 //       report.mjs:1747 같은 정의) + 받는함 `*.md` 중 이름에 «상신» + 세션 typed 턴
-//  (세션 typed 턴 = 세션 jsonl 줄 중 `promptSource === "typed"` · 같은 (sessionId, ts)
-//   는 한 잎 · 세션 폴더는 인자로 받는다 -- 인터프리터 세션 폴더만 가리켜야 한다.)
+//  (세션 typed 턴 = 세션 jsonl 줄 중 `promptSource === "typed"` · 접기 = «잎 바이트까지
+//   같은» 줄만 한 잎(이어하기가 줄을 통째로 복제한 경우) -- 열쇠 sessionId·ts 가 같아도
+//   본문이 다르면 잎 둘 · 세션 폴더는 인자로 받는다 -- 인터프리터 세션 폴더만 가리켜야 한다.)
 //
 // ─── 상태 낱말 규칙 ───
 //  원천 없음(경로 미지정 · ENOENT · 잎 0개) -> `none`.
 //  읽기 실패(ENOENT 외 오류 · 깨진 typed 줄 · 읽던 파일 사라짐) -> `read_error`.
 //  한 유형 안에서 하나라도 read_error 면 그 유형은 read_error -- 읽힌 일부로 뿌리를
 //  만들어 «완전한 것처럼» 봉인하지 않는다. none / read_error 는 0 이 아니다.
+//
+// ─── 상태 파일 건강 칸 (2R · 판정 2121) ───
+//  anchor-seal-state.json 에 칸 셋: failStreak(연속 실패 수) · lastFailureAt(마지막 실패
+//  시각) · lastSuccessAt(마지막 성공 시각). 단계가 예외로 끝난 회차마다 failStreak +1 ·
+//  예외 없이 끝난 회차(sealed · unchanged · cap_reached)는 failStreak = 0 + lastSuccessAt
+//  (lastFailureAt 은 남는다 · REWRITE_SUSPECT 회차는 어느 쪽도 안 건드린다). watch.log 의
+//  `anchor-seal: FAILED reason=... consecutive=N` 의 N 이 같은 값이다(상태 파일을 못 쓴
+//  회차는 unknown). 원격에는 이 칸들이 가지 않는다 -- 원격은 뿌리뿐이다.
+//
+// ─── 봉인 «뒤» 변조는 어떻게 드러나는가 (2R · 사람 손 · 자동 아님) ───
+//  봉인 뒤에 typed 턴 본문(또는 보조 원천 파일)을 한 바이트라도 고치면, 같은 원천에서 다시
+//  계산한 뿌리가 봉인 줄의 뿌리와 달라진다(본문 해시가 잎에 들어 있으므로). 원격에는
+//  뿌리만 있고 본문은 없으니, 대조는 «원천을 가진 쪽에서 뿌리를 다시 계산해 봉인 줄과
+//  맞대는 것» 이다. 아래 한 줄이 그 대조다(원격 복제본 루트에서 `git fetch origin
+//  anchor-seal` 뒤 · 유형별 match/mismatch/missing 을 봉인 줄마다 찍는다):
+//   git show origin/anchor-seal:seal.jsonl | node --input-type=module -e "import{readFileSync as r}from'node:fs';import{parseSealJournal as p,computeAnchorRoots as c,compareSealToRoots as m}from'./scripts/supervisor/anchor-seal.mjs';const a=process.argv.slice(1);const k=c({outboxDir:a[0],inboxDir:a[1],ledgerDir:a[2],sessionsDirs:[a[3]],northStarFile:a[4]}).roots;for(const s of p(r(0,'utf8')).seals)console.log(s.at,JSON.stringify(m(s.roots,k)))" <보내는함> <받는함> <원장폴더> <세션폴더> <북극성파일>
+//  읽는 법: 가장 최근 봉인 줄이 mismatch 면 «그 뒤 원천이 바뀌었다» 는 신호다 -- 정당한
+//  새 기록인지 사후 변조인지는 이 대조가 가르지 못한다(사람이 본다 · 감시 회차가 바뀐
+//  내용을 새 줄로 봉인하면 옛 줄만 mismatch 로 남는다). 이 대조는 아직 «사람 손» 이다 --
+//  자동 대조는 S2 후보로 등재만 했고 만들지 않았다.
 //
 // ⛔⭐정직 한계 (판정 1520 B 조건 7 -- 줄이지 마라):
 //  1. 봉인은 «사후 변조» 만 막는다. ORCH 가 처음부터 꾸민 내용을 봉인하는 것은 못 막는다.
@@ -59,6 +86,9 @@
 //  6. 이 단계는 «독립 분자» 에 합산되지 않는다(판정 1520 A) -- 1-C 자격 숫자는 안 바뀐다.
 //  7. 회차마다 원천을 «전부» 다시 읽고 해시한다(받는함 수천 건) -- 읽기 부하는 선형이다.
 //  8. 본문이 짧고 추측 가능한 파일은 잎 해시가 사전 대입으로 풀릴 수 있다.
+//  9. typed 턴의 본문 해시는 «그 줄 바이트» 만 굳힌다 -- 줄이 세션 파일에서 통째로 지워지면
+//     (잎이 줄어들어) 뿌리는 바뀌지만, 그 줄이 «원래 어떤 내용이었는지» 는 원격에 없다.
+//     봉인 뒤 변조 대조(위 한 줄)는 아직 사람 손이고, 봉인 자격은 ORCH 손에 있다(한계 2).
 //
 // Node 20 호환 -- ESM 표준 API 만 사용. 외부 의존 0. 사용자 절대 경로 · 실제 원격 기본값 0.
 import { createHash } from "node:crypto";
@@ -193,7 +223,9 @@ function singleFileGroup(file, io, memo) {
   return { status: read.status, bytes: [] };
 }
 
-// 세션 typed 턴 -> 정규 JSON 한 줄 {sessionId, ts}. 같은 (sessionId, ts) 는 한 잎.
+// 세션 typed 턴 -> 잎 바이트 = 정규 JSON 한 줄 {sessionId, ts, body}. 접기 = «잎 바이트가
+// 같은» 줄만 한 잎(이어하기가 줄을 통째로 복제한 경우) -- 열쇠(sessionId·ts)가 같아도
+// 본문이 다르면 잎 둘이다(2R · 판정 2121).
 function typedTurnGroup(sessionsDirs, io, memo) {
   const dirs = Array.isArray(sessionsDirs) ? sessionsDirs.filter(Boolean) : [];
   const seen = new Set();
@@ -205,12 +237,10 @@ function typedTurnGroup(sessionsDirs, io, memo) {
     for (const name of listing.names) {
       if (!name.endsWith(".jsonl")) continue;
       const read = readBytes(path.join(dir, name), io, memo);
-      if (read.status === "read_error")
-        return { status: "read_error", bytes: [] };
       if (read.status !== "ok") return { status: "read_error", bytes: [] };
-      const turns = parseTypedTurns(read.bytes.toString("utf8"));
-      if (turns === null) return { status: "read_error", bytes: [] };
-      for (const t of turns) seen.add(t);
+      const leaves = typedTurnLeaves(read.bytes);
+      if (leaves === null) return { status: "read_error", bytes: [] };
+      for (const leaf of leaves) seen.add(leaf);
     }
   }
   return {
@@ -219,26 +249,40 @@ function typedTurnGroup(sessionsDirs, io, memo) {
   };
 }
 
-// 깨진 줄(promptSource 를 담은데 JSON 이 아님 · 필드 없음)은 null -> read_error.
-function parseTypedTurns(text) {
+// 한 줄 -> 잎 문자열 | "" (typed 아님 · 건너뜀) | null (깨진 줄 -> read_error).
+// body = 그 줄 «원문 바이트»(줄 끝 `\n` 앞까지 · `\r` 은 줄 바이트로 센다)의 sha256 hex.
+function typedLeafOfLine(line) {
+  let obj;
+  try {
+    obj = JSON.parse(line.toString("utf8"));
+  } catch {
+    return null;
+  }
+  if (!obj || typeof obj !== "object" || obj.promptSource !== "typed")
+    return "";
+  if (typeof obj.sessionId !== "string" || typeof obj.timestamp !== "string") {
+    return null;
+  }
+  const body = createHash("sha256").update(line).digest("hex");
+  return JSON.stringify({ sessionId: obj.sessionId, ts: obj.timestamp, body });
+}
+
+// 세션 jsonl «원문 바이트» -> typed 턴 잎 목록(줄 순서). 깨진 줄(promptSource 를 담은데
+// JSON 이 아님 · 필드 없음)이 하나라도 있으면 null -> read_error. 줄은 바이트 0x0a 로만
+// 자른다(디코드 뒤 문자열이 아니라 «원문 바이트» 로 해시하려는 것이다).
+export function typedTurnLeaves(bytes) {
+  const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
   const out = [];
-  for (const line of text.split("\n")) {
+  let start = 0;
+  while (start < buf.length) {
+    const nl = buf.indexOf(0x0a, start);
+    const end = nl === -1 ? buf.length : nl;
+    const line = buf.subarray(start, end);
+    start = end + 1;
     if (!line.includes("promptSource")) continue;
-    let obj;
-    try {
-      obj = JSON.parse(line);
-    } catch {
-      return null;
-    }
-    if (!obj || typeof obj !== "object" || obj.promptSource !== "typed")
-      continue;
-    if (
-      typeof obj.sessionId !== "string" ||
-      typeof obj.timestamp !== "string"
-    ) {
-      return null;
-    }
-    out.push(JSON.stringify({ sessionId: obj.sessionId, ts: obj.timestamp }));
+    const leaf = typedLeafOfLine(line);
+    if (leaf === null) return null;
+    if (leaf !== "") out.push(leaf);
   }
   return out;
 }
@@ -460,6 +504,26 @@ function writeStateAtomic({ statePath, state, writeFn, renameFn, mkdirFn }) {
   renameFn(tmp, statePath);
 }
 
+// 상태 파일 «건강» 칸 셋(2R · 판정 2121): 연속 실패 수 · 마지막 실패 시각 · 마지막 성공 시각.
+// 성공(예외 없이 sealed · unchanged · cap_reached 로 끝난 회차)이면 연속 실패 수는 0 으로
+// 돌아가고 마지막 실패 시각은 «남는다». REWRITE_SUSPECT 회차는 어느 쪽도 건드리지 않는다.
+function successHealth(state, ctx) {
+  return {
+    failStreak: 0,
+    lastFailureAt: state.lastFailureAt ?? null,
+    lastSuccessAt: new Date(ctx.now).toISOString(),
+  };
+}
+
+function failureHealth(state, ctx) {
+  const prev = Number(state.failStreak);
+  return {
+    failStreak: (Number.isFinite(prev) && prev > 0 ? prev : 0) + 1,
+    lastFailureAt: new Date(ctx.now).toISOString(),
+    lastSuccessAt: state.lastSuccessAt ?? null,
+  };
+}
+
 function rootsEqual(a, b) {
   if (!a || !b) return false;
   return ANCHOR_TYPE_KEYS.every((k) => a[k] === b[k]);
@@ -637,13 +701,36 @@ function persist({ state, statePath, io }) {
 // runAnchorSealOnce -- 한 회차. ⛔던질 수 있다(watch-run 의 runAnchorSealStep 이 잡아
 // FAILED 구간으로 바꾼다 · 던지는 문구는 토큰을 이미 가렸다). 모든 I/O 주입 가능.
 export function runAnchorSealOnce(params) {
-  if (!params.remote) throw new Error("remote_missing");
   const ctx = buildContext(params);
   const state = parseState(readStateText(ctx));
-  const { roots } = computeAnchorRoots(params.sources, params.srcIo);
-  const early = decideEarlyOutcome({ ctx, state, roots });
-  if (early) return early;
-  return sealAndPush({ ctx, state, roots });
+  try {
+    if (!params.remote) throw new Error("remote_missing");
+    const { roots } = computeAnchorRoots(params.sources, params.srcIo);
+    const early = decideEarlyOutcome({ ctx, state, roots });
+    if (early) return early;
+    return sealAndPush({ ctx, state, roots });
+  } catch (err) {
+    throw recordFailure({ ctx, state, err });
+  }
+}
+
+// 실패 회차: 연속 실패 수 +1 · 마지막 실패 시각을 상태 파일에 남기고, 던질 오류에 연속 값
+// (`consecutiveFailures`)을 붙여 돌려준다 -- watch-run 이 FAILED 줄에 싣는다. ⛔상태 파일을
+// 못 써도 원래 오류를 가리지 않는다(연속 값은 «알 수 없음» = 붙이지 않는다).
+function recordFailure({ ctx, state, err }) {
+  const error = err instanceof Error ? err : new Error(String(err));
+  const health = failureHealth(state, ctx);
+  try {
+    persist({
+      state: { ...state, ...health },
+      statePath: ctx.statePath,
+      io: ctx.writeIo,
+    });
+    error.consecutiveFailures = health.failStreak;
+  } catch {
+    // 상태 파일 쓰기 실패 -- 연속 값 없음(FAILED 줄은 consecutive=unknown).
+  }
+  return error;
 }
 
 function readStateText(ctx) {
@@ -681,6 +768,12 @@ function buildContext(p) {
 // 그 밖에는 null -> 봉인 경로로 간다.
 function decideEarlyOutcome({ ctx, state, roots }) {
   if (rootsEqual(state.last, roots)) {
+    // 변경 없음도 «예외 없이 끝난 회차» -- 연속 실패 수를 0 으로 돌리고 성공 시각을 남긴다.
+    persist({
+      state: { ...state, ...successHealth(state, ctx) },
+      statePath: ctx.statePath,
+      io: ctx.writeIo,
+    });
     return {
       notRun: false,
       status: "unchanged",
@@ -693,7 +786,7 @@ function decideEarlyOutcome({ ctx, state, roots }) {
   const unsealed = Number(state.unsealed?.[day] ?? 0) + 1;
   const unsealedMap = pruneDays({ ...state.unsealed, [day]: unsealed });
   persist({
-    state: { ...state, unsealed: unsealedMap },
+    state: { ...state, unsealed: unsealedMap, ...successHealth(state, ctx) },
     statePath: ctx.statePath,
     io: ctx.writeIo,
   });
@@ -778,6 +871,7 @@ function sealAndPush({ ctx, state, roots }) {
     }),
     unsealed: pruneDays(state.unsealed),
     suspect: null,
+    ...successHealth(state, ctx),
   };
   persist({ state: next, statePath: ctx.statePath, io: ctx.writeIo });
   const { none, readError } = countWords(roots);

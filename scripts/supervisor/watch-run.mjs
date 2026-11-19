@@ -1795,7 +1795,11 @@ function anchorSealLogSegment(result) {
   if (!isPlainObject(result) || result.notRun === true) return null;
   if (result.failed === true) {
     const msg = sanitizeFailureToken(result.message, "unknown");
-    return `anchor-seal: FAILED reason=${truncateToken(msg, 120)}`;
+    // 2R: 연속 몇 번째 실패인지(상태 파일 failStreak 와 같은 값) -- 못 쓴 회차는 unknown.
+    const streak = Number.isInteger(result.consecutiveFailures)
+      ? String(result.consecutiveFailures)
+      : "unknown";
+    return `anchor-seal: FAILED reason=${truncateToken(msg, 120)} consecutive=${streak}`;
   }
   return typeof result.segment === "string" ? result.segment : null;
 }
@@ -2846,6 +2850,7 @@ export function runAnchorSealStep({
       notRun: false,
       failed: true,
       message: err && err.message ? err.message : String(err),
+      consecutiveFailures: err ? err.consecutiveFailures : undefined,
     };
   }
 }

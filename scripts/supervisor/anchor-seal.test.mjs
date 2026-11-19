@@ -1006,3 +1006,461 @@ test("redactSecret -- 토큰 값은 어떤 문구에서도 가려진다", async 
   );
   assert.equal(seal.redactSecret("plain", null), "plain");
 });
+
+// ===========================================================================
+// HYK-255-s1-anchor-seal-2 (판정 #20261119-2121 · 검토 1R 상신 가·나 수리) -- 2R 칸.
+// 검토자 합성 입력(probe.mjs I · J 구역)을 «그대로» 옮겨 고정한다: 열쇠(sessionId·ts)가
+// 같고 본문이 다른 두 줄 · 둘째 줄 본문 변경 · 둘째 줄 삭제 · 한 줄 본문 변경 · 봉인 뒤
+// 본문 변조 · 거부 원격 4회차. 전부 프로덕션 회차(runWatchOnce)로 구동한다.
+// ===========================================================================
+const SESSION_ID2 = "f0e1d2c3-aaaa-4bbb-8ccc-dddddddddddd";
+const TS_SAME = "2026-11-19T03:00:00.000Z";
+// 본문 원문 표지 -- 원격 · 로그 · 상태 파일 · 봉인 줄 어디에도 없어야 한다.
+const R2_RAW_MARK = "R2RAWBODY-원문-표지-0042";
+
+function turnLine(body, sid = SESSION_ID, ts = TS_SAME) {
+  return JSON.stringify({
+    type: "user",
+    sessionId: sid,
+    timestamp: ts,
+    promptSource: "typed",
+    message: { content: body },
+  });
+}
+
+function writeTypedRaw(w, lines, sid = SESSION_ID) {
+  fs.writeFileSync(
+    join(w.sessionsDir, `${sid}.jsonl`),
+    `${lines.join("\n")}\n`,
+  );
+}
+
+function isoOf(ms) {
+  return new Date(ms).toISOString();
+}
+
+test("R2 ⑴ 열쇠(sessionId·ts)가 같고 본문이 다른 두 줄 -- 둘째 줄 본문을 바꾸면 g1·g7 뿌리가 바뀌고 새 봉인이 올라간다", async () => {
+  await withWorldAsync(async (w) => {
+    writeTypedRaw(w, [turnLine("BODY-A"), turnLine("BODY-B")]);
+    const r1 = cycle(w, T0);
+    assert.equal(r1.anchorSeal.status, "sealed");
+    writeTypedRaw(w, [turnLine("BODY-A"), turnLine("BODY-B-CHANGED")]);
+    const r2 = cycle(w, T0 + 15 * MIN);
+    assert.equal(
+      r2.anchorSeal.status,
+      "sealed",
+      "둘째 줄 본문을 고쳤는데 unchanged -- 열쇠만 보고 접었다",
+    );
+    assert.notEqual(r2.anchorSeal.roots.g1, r1.anchorSeal.roots.g1);
+    assert.notEqual(r2.anchorSeal.roots.g7, r1.anchorSeal.roots.g7);
+    assert.equal(
+      r2.anchorSeal.roots.g2,
+      r1.anchorSeal.roots.g2,
+      "대조: 원장 뿌리는 그대로",
+    );
+    assert.equal(remoteCommitCount(w), 2);
+    // 양성 대조: 같은 입력을 한 번 더 돌리면 unchanged -- 달라진 것은 본문뿐이다.
+    const r3 = cycle(w, T0 + 30 * MIN);
+    assert.equal(r3.anchorSeal.status, "unchanged");
+  });
+});
+
+test("R2 ⑵ 같은 열쇠 두 줄에서 둘째 줄을 지우면 뿌리가 바뀐다(둘은 잎 둘이다)", async () => {
+  await withWorldAsync(async (w) => {
+    writeTypedRaw(w, [turnLine("BODY-A"), turnLine("BODY-B")]);
+    const r1 = cycle(w, T0);
+    writeTypedRaw(w, [turnLine("BODY-A")]);
+    const r2 = cycle(w, T0 + 15 * MIN);
+    assert.equal(
+      r2.anchorSeal.status,
+      "sealed",
+      "둘째 줄을 지웠는데 unchanged -- 둘째 줄이 잎이 아니었다",
+    );
+    assert.notEqual(r2.anchorSeal.roots.g1, r1.anchorSeal.roots.g1);
+    assert.notEqual(r2.anchorSeal.roots.g7, r1.anchorSeal.roots.g7);
+    assert.equal(remoteCommitCount(w), 2);
+  });
+});
+
+test("R2 ⑶ 한 줄만 있을 때 그 줄 본문을 한 글자 고쳐도 뿌리가 바뀐다", async () => {
+  await withWorldAsync(async (w) => {
+    writeTypedRaw(w, [turnLine("BODY-A")]);
+    const r1 = cycle(w, T0);
+    writeTypedRaw(w, [turnLine("BODY-A-EDITED")]);
+    const r2 = cycle(w, T0 + 15 * MIN);
+    assert.equal(
+      r2.anchorSeal.status,
+      "sealed",
+      "본문 편집이 뿌리에 안 닿았다",
+    );
+    assert.notEqual(r2.anchorSeal.roots.g1, r1.anchorSeal.roots.g1);
+    assert.notEqual(r2.anchorSeal.roots.g7, r1.anchorSeal.roots.g7);
+    // 열쇠 필드만 바뀐 경우도 바뀐다(대조).
+    writeTypedRaw(w, [turnLine("BODY-A-EDITED", SESSION_ID2)]);
+    const r3 = cycle(w, T0 + 30 * MIN);
+    assert.equal(r3.anchorSeal.status, "sealed");
+    assert.notEqual(r3.anchorSeal.roots.g1, r2.anchorSeal.roots.g1);
+  });
+});
+
+test("R2 ⑷ 봉인 «뒤» 본문을 고치고 다음 회차를 돌리면 결과가 unchanged 가 아니다(원격 봉인 커밋 +1)", async () => {
+  await withWorldAsync(async (w) => {
+    writeTypedRaw(w, [turnLine("BODY-A")]);
+    const sealed = cycle(w, T0);
+    assert.equal(sealed.anchorSeal.status, "sealed");
+    assert.equal(remoteCommitCount(w), 1);
+    writeTypedRaw(w, [turnLine("BODY-A-TAMPERED-AFTER-SEAL")]);
+    const after = cycle(w, T0 + MIN);
+    assert.notEqual(after.anchorSeal.status, "unchanged");
+    assert.equal(after.anchorSeal.status, "sealed");
+    assert.equal(remoteCommitCount(w), 2);
+    assert.match(lastLogLine(w), /anchor-seal: sealed/);
+  });
+});
+
+test("R2 ⑸ 같은 바이트 줄 둘(이어하기 복제) = 잎 하나 · 본문 원문 · 본문 해시는 원격 · 로그 · 상태 파일 · 봉인 줄 어디에도 0", async () => {
+  const seal = await loadSeal();
+  await withWorldAsync(async (w) => {
+    const rawLine = turnLine(R2_RAW_MARK);
+    writeTypedRaw(w, [rawLine]);
+    const one = cycle(w, T0);
+    assert.equal(one.anchorSeal.status, "sealed");
+    // 같은 줄이 두 번(이어하기가 줄을 통째로 복제) -> 잎 하나 -> 뿌리 같음 -> unchanged.
+    writeTypedRaw(w, [rawLine, rawLine]);
+    const dup = cycle(w, T0 + MIN);
+    assert.equal(
+      dup.anchorSeal.status,
+      "unchanged",
+      "같은 바이트 줄 복제가 잎을 늘렸다",
+    );
+    assert.equal(dup.anchorSeal.roots.g1, one.anchorSeal.roots.g1);
+    // 같은 줄이 다른 세션 파일에 복제돼도(이어하기 파일) 잎 하나.
+    writeTypedRaw(w, [rawLine], SESSION_ID2);
+    const copy = cycle(w, T0 + 2 * MIN);
+    assert.equal(copy.anchorSeal.status, "unchanged");
+    // 비밀 표지 0: 원문 · 본문 해시(줄 원문 바이트의 sha256) 모두.
+    const bodyHash = sha256(Buffer.from(rawLine, "utf8"));
+    const remoteAll = execFileSync(
+      "git",
+      ["--git-dir", w.remote, "cat-file", "--batch-all-objects", "--batch"],
+      { maxBuffer: 64 * 1024 * 1024 },
+    ).toString("utf8");
+    assert.ok(
+      remoteAll.includes('"roots"'),
+      "양성 대조: 봉인 줄이 실제로 있다",
+    );
+    const stateText = fs.readFileSync(
+      join(w.watchDir, seal.STATE_FILE),
+      "utf8",
+    );
+    assert.ok(
+      stateText.includes('"last"'),
+      "양성 대조: 상태 파일에 뿌리 칸이 있다",
+    );
+    const places = {
+      remote: remoteAll,
+      log: logText(w),
+      state: stateText,
+      sealGit: git(["--git-dir", join(w.sealDir, ".git"), "log", "-p"]),
+    };
+    for (const [where, text] of Object.entries(places)) {
+      assert.ok(!text.includes(R2_RAW_MARK), `${where} 에 본문 원문이 있다`);
+      assert.ok(!text.includes(bodyHash), `${where} 에 본문 해시가 있다`);
+    }
+  });
+});
+
+test("R2 ⑸ 잎 바이트 모양 -- 정규 JSON 한 줄 {sessionId, ts, body} · body = 줄 «원문 바이트» sha256(64hex) · 원문은 잎에 없다 · 줄 끝 \\n 만 뺀다", async () => {
+  const seal = await loadSeal();
+  const raw = turnLine(R2_RAW_MARK);
+  const expected = JSON.stringify({
+    sessionId: SESSION_ID,
+    ts: TS_SAME,
+    body: sha256(Buffer.from(raw, "utf8")),
+  });
+  const leaves = seal.typedTurnLeaves(Buffer.from(`${raw}\n`, "utf8"));
+  assert.deepEqual(leaves, [expected]);
+  assert.match(JSON.parse(leaves[0]).body, /^[0-9a-f]{64}$/);
+  assert.deepEqual(Object.keys(JSON.parse(leaves[0])), [
+    "sessionId",
+    "ts",
+    "body",
+  ]);
+  assert.ok(!leaves[0].includes(R2_RAW_MARK), "잎에 본문 원문이 들어갔다");
+  // 줄 끝 규칙: 끝 개행이 없어도 같은 잎 · CRLF 의 \r 은 «뺀다» 가 아니라 줄 바이트로 센다.
+  assert.deepEqual(seal.typedTurnLeaves(Buffer.from(raw, "utf8")), [expected]);
+  const crlf = seal.typedTurnLeaves(Buffer.from(`${raw}\r\n`, "utf8"));
+  assert.equal(
+    JSON.parse(crlf[0]).body,
+    sha256(Buffer.from(`${raw}\r`, "utf8")),
+    "\\r 은 줄 바이트다 -- 해시 입력은 줄 끝 \\n 앞까지",
+  );
+  // 원문 «바이트» -- 깨진 UTF-8 한 바이트만 달라도 본문 해시가 달라진다(디코드 뒤 문자열이 아님).
+  const head = Buffer.from(raw.replace(R2_RAW_MARK, "X"), "utf8");
+  const at = head.indexOf("X");
+  const withFF = Buffer.concat([
+    head.subarray(0, at),
+    Buffer.from([0xff]),
+    head.subarray(at + 1),
+  ]);
+  const withFE = Buffer.concat([
+    head.subarray(0, at),
+    Buffer.from([0xfe]),
+    head.subarray(at + 1),
+  ]);
+  const lf = seal.typedTurnLeaves(Buffer.concat([withFF, Buffer.from("\n")]));
+  const le = seal.typedTurnLeaves(Buffer.concat([withFE, Buffer.from("\n")]));
+  assert.notEqual(JSON.parse(lf[0]).body, JSON.parse(le[0]).body);
+  assert.equal(JSON.parse(lf[0]).body, sha256(withFF));
+  // typed 아닌 줄 · promptSource 없는 줄은 잎이 아니다 · 깨진 줄은 null(= read_error).
+  const paste = JSON.stringify({
+    sessionId: SESSION_ID,
+    timestamp: TS_SAME,
+    promptSource: "paste",
+  });
+  assert.deepEqual(
+    seal.typedTurnLeaves(Buffer.from(`${paste}\n\n{"x":1}\n`)),
+    [],
+  );
+  assert.equal(
+    seal.typedTurnLeaves(Buffer.from('{"promptSource":"typed", 깨진\n')),
+    null,
+  );
+});
+
+test("R2 ⑸ 정규화 고정 -- g1 뿌리는 시험이 독립적으로 다시 접은 값(보내는함 파일 바이트 잎 + typed 턴 JSON 잎)과 같다", async () => {
+  const seal = await loadSeal();
+  await withWorldAsync(async (w) => {
+    const raw = turnLine("BODY-A");
+    writeTypedRaw(w, [raw]);
+    const leafOf = (type, bytes) =>
+      createHash("sha256")
+        .update(
+          Buffer.concat([
+            Buffer.from("hyk255-anchor-seal/v1", "utf8"),
+            Buffer.from([0]),
+            Buffer.from(type, "utf8"),
+            Buffer.from([0]),
+            Buffer.from(String(bytes.length), "utf8"),
+            Buffer.from([0]),
+            bytes,
+          ]),
+        )
+        .digest();
+    const outFile = fs.readFileSync(
+      join(w.outboxDir, `2026-11-19-1000-${LEAK_NAME}.md`),
+    );
+    const typedLeaf = Buffer.from(
+      JSON.stringify({
+        sessionId: SESSION_ID,
+        ts: TS_SAME,
+        body: sha256(Buffer.from(raw, "utf8")),
+      }),
+      "utf8",
+    );
+    const [l1, l2] = [leafOf("g1", outFile), leafOf("g1", typedLeaf)].sort(
+      Buffer.compare,
+    );
+    const expected = createHash("sha256")
+      .update(Buffer.concat([Buffer.from([1]), l1, l2]))
+      .digest("hex");
+    assert.equal(
+      seal.computeAnchorRoots(sealOpts(w).sources).roots.g1,
+      expected,
+    );
+  });
+});
+
+test("R2 ⑹ 거부 원격 4회차 -- 상태 파일 연속 실패 수 1·2·3·4 · 마지막 실패 시각 · FAILED 줄에 연속 값 · 성공하면 0 · 마지막 성공 시각", async () => {
+  const seal = await loadSeal();
+  await withWorldAsync(async (w) => {
+    // 원격이 모든 push 를 거부한다(ref 잠금 파일 -- 셸 훅 없이 · ⑼ 칸과 같은 방식).
+    const lock = join(w.remote, "refs", "heads", "anchor-seal.lock");
+    fs.mkdirSync(join(w.remote, "refs", "heads"), { recursive: true });
+    fs.writeFileSync(lock, "");
+    const statePath = join(w.watchDir, seal.STATE_FILE);
+    const readState = () => JSON.parse(fs.readFileSync(statePath, "utf8"));
+    for (let i = 0; i < 4; i += 1) {
+      if (i === 2) fs.appendFileSync(w.northStarFile, "x"); // 검토자 입력: 3 회차에 원천도 바뀐다
+      const now = T0 + i * MIN;
+      const r = cycle(w, now);
+      assert.equal(r.anchorSeal.failed, true, `회차 ${i + 1}`);
+      const st = readState();
+      assert.equal(st.failStreak, i + 1, `연속 실패 수 (회차 ${i + 1})`);
+      assert.equal(
+        st.lastFailureAt,
+        isoOf(now),
+        `마지막 실패 시각 (회차 ${i + 1})`,
+      );
+      assert.ok(st.lastSuccessAt == null, "성공한 적이 없다");
+      assert.match(
+        lastLogLine(w),
+        new RegExp(
+          `anchor-seal: FAILED reason=\\S+ consecutive=${i + 1}(\\s|$)`,
+        ),
+      );
+    }
+    assert.equal(remoteTip(w), null, "거부 원격에는 아무것도 안 올라갔다");
+    // 성공 1 회 -> 0 으로 돌아가고 마지막 성공 시각이 찍힌다 · 마지막 실패 시각은 남는다.
+    fs.rmSync(lock);
+    const okNow = T0 + 10 * MIN;
+    const ok = cycle(w, okNow);
+    assert.equal(ok.anchorSeal.status, "sealed");
+    const afterOk = readState();
+    assert.equal(afterOk.failStreak, 0);
+    assert.equal(afterOk.lastSuccessAt, isoOf(okNow));
+    assert.equal(afterOk.lastFailureAt, isoOf(T0 + 3 * MIN));
+    assert.ok(afterOk.last, "성공 때 봉인 상태(last)도 같이 전진한다");
+    assert.doesNotMatch(lastLogLine(w), /FAILED/);
+    // 다시 실패하면 1 부터 센다(이어 세지 않는다).
+    fs.writeFileSync(lock, "");
+    fs.appendFileSync(w.northStarFile, "y");
+    const again = cycle(w, T0 + 20 * MIN);
+    assert.equal(again.anchorSeal.failed, true);
+    assert.equal(readState().failStreak, 1);
+    assert.match(lastLogLine(w), /consecutive=1(\s|$)/);
+  });
+});
+
+test("R2 ⑹ 실패 뒤 원천이 봉인된 내용으로 돌아오면(unchanged) 연속 실패 수도 0 · 상태 파일 쓰기 실패는 회차를 죽이지 않고 연속 값만 unknown", async () => {
+  const seal = await loadSeal();
+  await withWorldAsync(async (w) => {
+    cycle(w, T0); // 봉인
+    const lock = join(w.remote, "refs", "heads", "anchor-seal.lock");
+    fs.writeFileSync(lock, "");
+    const f = join(w.inboxDir, "2026-11-19-1520-상신1530-마커.md");
+    const original = fs.readFileSync(f);
+    fs.appendFileSync(f, "변경");
+    const bad = cycle(w, T0 + MIN);
+    assert.equal(bad.anchorSeal.failed, true);
+    const statePath = join(w.watchDir, seal.STATE_FILE);
+    assert.equal(JSON.parse(fs.readFileSync(statePath, "utf8")).failStreak, 1);
+    fs.writeFileSync(f, original);
+    const same = cycle(w, T0 + 2 * MIN);
+    assert.equal(same.anchorSeal.status, "unchanged");
+    const st = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    assert.equal(st.failStreak, 0);
+    assert.equal(st.lastSuccessAt, isoOf(T0 + 2 * MIN));
+    // 상태 파일을 쓸 수 없는 회차: 실패 기록도 못 쓰지만 단계 실패는 FAILED 로 남는다(원인은 가리지 않는다).
+    fs.appendFileSync(f, "또");
+    const noWrite = cycle(
+      w,
+      T0 + 3 * MIN,
+      {},
+      {
+        writeFn: (p, ...a) => {
+          if (String(p).includes(seal.STATE_FILE))
+            throw new Error("EPERM-state-sim");
+          return fs.writeFileSync(p, ...a);
+        },
+      },
+    );
+    assert.equal(noWrite.anchorSeal.failed, true);
+    assert.match(
+      lastLogLine(w),
+      /anchor-seal: FAILED reason=\S+ consecutive=unknown/,
+    );
+  });
+});
+
+// ⑺ 읽기 실패 칸(검토 1R P2-1 · 변이 V4 메우기) -- «맞는 이름의 파일 하나» 를 읽을 수 없으면
+// 그 유형은 read_error 다(읽힌 나머지로 «완전한 것처럼» 접지 않는다).
+function failingReadIo(suffix, code) {
+  return {
+    readFileFn: (file, ...rest) => {
+      if (String(file).endsWith(suffix)) {
+        throw Object.assign(new Error(`${code}: 합성 읽기 실패`), { code });
+      }
+      return fs.readFileSync(file, ...rest);
+    },
+  };
+}
+
+test("R2 ⑺ 받는함 «상신» 파일 하나를 읽을 수 없으면(EACCES · 나머지는 읽힘) g7 = read_error · g1 은 영향 없음 · 풀리면 새 뿌리로 봉인", async () => {
+  await withWorldAsync(async (w) => {
+    fs.writeFileSync(
+      join(w.inboxDir, "2026-11-19-1521-상신1531-읽기불가.md"),
+      "둘째 상신\n",
+    );
+    const bad = cycle(w, T0, { srcIo: failingReadIo("읽기불가.md", "EACCES") });
+    assert.equal(bad.anchorSeal.status, "sealed");
+    assert.equal(bad.anchorSeal.roots.g7, "read_error");
+    assert.match(bad.anchorSeal.roots.g1, /^[0-9a-f]{64}$/);
+    assert.match(lastLogLine(w), /anchor-seal: sealed none=\d+ read_error=1/);
+    const fixed = cycle(w, T0 + 15 * MIN);
+    assert.equal(fixed.anchorSeal.status, "sealed");
+    assert.match(fixed.anchorSeal.roots.g7, /^[0-9a-f]{64}$/);
+  });
+});
+
+test("R2 ⑺ 보내는함 «게이트1» 파일 하나를 읽을 수 없으면 g1 = read_error · g7 은 영향 없음 · 읽다가 사라진 파일(ENOENT)도 none 이 아니라 read_error", async () => {
+  await withWorldAsync(async (w) => {
+    fs.writeFileSync(
+      join(w.outboxDir, "2026-11-19-1001-둘째-게이트1-읽기불가.md"),
+      "둘째 게이트1\n",
+    );
+    for (const code of ["EACCES", "ENOENT"]) {
+      const r = cycle(w, T0, { srcIo: failingReadIo("읽기불가.md", code) });
+      assert.equal(r.anchorSeal.roots.g1, "read_error", code);
+      assert.match(r.anchorSeal.roots.g7, /^[0-9a-f]{64}$/, code);
+      assert.notEqual(r.anchorSeal.roots.g1, "none", code);
+      fs.rmSync(w.watchDir, { recursive: true, force: true });
+      fs.rmSync(w.sealDir, { recursive: true, force: true });
+      fs.rmSync(w.remote, { recursive: true, force: true });
+      git(["init", "--bare", "-q", w.remote]);
+    }
+  });
+});
+
+test("R2 ⑻ 봉인 뒤 변조가 드러나는 길 -- anchor-seal.mjs 머리에 적힌 대조 명령 한 줄이 실제로 돈다(변조 전 전부 match · 변조 뒤 g1·g7 mismatch)", async () => {
+  const src = fs.readFileSync(
+    join(ROOT, "scripts", "supervisor", "anchor-seal.mjs"),
+    "utf8",
+  );
+  const m = src.match(
+    /^\/\/ {2,}git show origin\/anchor-seal:seal\.jsonl \| node --input-type=module -e "([^"]+)" (.+)$/m,
+  );
+  assert.ok(m, "머리 주석에 대조 명령 한 줄이 없다");
+  assert.match(m[2], /보내는함.*받는함.*원장.*세션.*북극성/);
+  await withWorldAsync(async (w) => {
+    writeTypedRaw(w, [turnLine("BODY-A")]);
+    cycle(w, T0);
+    const journal = remoteSealText(w);
+    assert.ok(journal.includes('"roots"'));
+    const s = sealOpts(w).sources;
+    const args = [
+      s.outboxDir,
+      s.inboxDir,
+      s.ledgerDir,
+      s.sessionsDirs[0],
+      s.northStarFile,
+    ];
+    const run = () =>
+      execFileSync(
+        process.execPath,
+        ["--input-type=module", "-e", m[1], ...args],
+        {
+          cwd: ROOT,
+          input: journal,
+          encoding: "utf8",
+        },
+      )
+        .trim()
+        .split("\n");
+    const before = run();
+    assert.equal(before.length, 1, "봉인 줄 하나 -> 출력 한 줄");
+    const [, beforeJson] = before[0].split(" ");
+    assert.deepEqual(Object.values(JSON.parse(beforeJson)), [
+      "match",
+      "match",
+      "match",
+      "match",
+      "match",
+    ]);
+    writeTypedRaw(w, [turnLine("BODY-A-TAMPERED-AFTER-SEAL")]); // 봉인 뒤 한 줄 변조(회차 안 돌림)
+    const after = JSON.parse(run()[0].split(" ")[1]);
+    assert.equal(after.g1, "mismatch");
+    assert.equal(after.g7, "mismatch");
+    assert.equal(after.g2, "match");
+  });
+});
