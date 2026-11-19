@@ -96,8 +96,22 @@ function matchSeatBindFlag(arg) {
   return eq === -1 ? { field } : { field, inline: arg.slice(eq + 1) };
 }
 
+// 이 CLI 가 아는 `--…` 인자 이름인가(`--flag=값` 모양이면 `=` 앞 이름으로 본다).
+// «기록만» 인자 값 자리의 `--` 토큰이 «값»인지 «다음 인자»인지 가르는 데만 쓴다.
+function isKnownFlagToken(token) {
+  if (typeof token !== "string" || !token.startsWith("--")) return false;
+  const eq = token.indexOf("=");
+  const name = eq === -1 ? token : token.slice(0, eq);
+  return (
+    name === "--help" ||
+    Object.hasOwn(FLAG_TO_FIELD, name) ||
+    Object.hasOwn(SEAT_BIND_FLAG_TO_FIELD, name)
+  );
+}
+
 // args[i] 가 «기록만» 인자면 값을 parsed 에 담고 «마지막으로 쓴 인덱스»를 돌려준다
-// (값이 없거나 다음 토큰이 또 다른 플래그면 빈 값으로 두고 그 토큰은 소비하지 않는다).
+// (값이 없거나 다음 토큰이 «알려진» 플래그 이름이면 빈 값으로 두고 그 토큰은 소비하지 않는다 --
+// 알려진 이름이 아닌 `--` 토큰은 «값» 이다: 어떤 값이어도 거부 0, S2 후속 정리 ⓒ).
 // «기록만» 인자가 아니면 null.
 function consumeSeatBindFlag(args, i, parsed) {
   const flag = matchSeatBindFlag(args[i]);
@@ -108,7 +122,7 @@ function consumeSeatBindFlag(args, i, parsed) {
     return i;
   }
   const next = args[i + 1];
-  if (typeof next === "string" && !next.startsWith("--")) {
+  if (typeof next === "string" && !isKnownFlagToken(next)) {
     parsed[flag.field] = next;
     return i + 1;
   }
@@ -138,7 +152,15 @@ function resolveSeatBind(parsed) {
   const reasonRaw = isNonEmptyString(parsed.seatBindReason)
     ? parsed.seatBindReason.slice(0, SEAT_BIND_MAX_REASON_CHARS)
     : "";
-  const reason = reasonRaw || reasonOverride || "";
+  // ERROR 의 «원인 사유»(판정값 인식 불가 · 누락)가 있으면 그것이 먼저고, 호출자가 같이 준 사유는
+  // `;given=` 뒤에 보존한다 -- 두 사유가 같은 칸을 놓고 «겹쳐» 한쪽이 지워지지 않게(S2 후속 정리 ⓔ).
+  // 전체 120자 상한은 그대로다.
+  const reason = reasonOverride
+    ? (reasonRaw
+        ? `${reasonOverride};given=${reasonRaw}`
+        : reasonOverride
+      ).slice(0, SEAT_BIND_MAX_REASON_CHARS)
+    : reasonRaw;
   const candidates = isNonEmptyString(parsed.seatBindCandidates)
     ? parsed.seatBindCandidates.slice(0, SEAT_BIND_MAX_CANDIDATES_CHARS)
     : "";
