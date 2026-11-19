@@ -307,6 +307,14 @@
       "count": 1,
       "category": "E2",
       "note": "엔진별 어댑터·관측 모듈(파일명/역할이 엔진 고유) -- PM 설계 §b E2"
+    },
+    {
+      "file": "scripts/supervisor/usage-threshold-wire.mjs",
+      "literal": ".claude",
+      "line": 42,
+      "count": 1,
+      "category": "E2",
+      "note": "HYK-406-usage-watch-1: 상태줄 생성기(harness-hud.mjs:142)가 쓰는 ~/.claude/hud/ratelimit-<역할>.json 을 읽는 관측 모듈 -- 파일의 «위치» 자체가 그 엔진의 홈 아래라 이 리터럴이 곧 읽기 원천이다(rate-limit-stall-wire.mjs 와 같은 E2 근거 · 같은 홈 디렉터리 기본값). 위조 차단 0 · OBSERVER · 앵커 아님."
     }
   ],
   "branchLiteralBaseline": []
