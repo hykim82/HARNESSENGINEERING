@@ -1210,13 +1210,27 @@ test("ⓖ CLI main -- 인자 해석 → runRescanOnce(프로덕션 진입점) �
 
 test("ⓖ CLI 스폰(망 0) -- 인자 거부 갈래 · 먼 미래 창 거부(시계와 무관한 갈래) = exit 1 · 마지막 줄이 신호 · 파일 0", () =>
   withTmp((dir) => {
+    // 자식도 실제 망에 못 나가게 막는다(변이 · 회귀로 문이 열려도 실망 호출 0) -- 전역 fetch 를 던지게 바꾸는 preload 를 먼저 싣는다.
+    const blockPath = path.join(dir, "block-fetch.mjs");
+    fs.writeFileSync(
+      blockPath,
+      [
+        `globalThis.fetch = async () => {`,
+        `  process.stderr.write("BLOCKED-FETCH\\n");`,
+        `  throw new Error("합성 시험에서 실제 망 호출 금지");`,
+        `};`,
+      ].join("\n"),
+      "utf8",
+    );
     const spawnCli = (args) =>
-      spawnSync(process.execPath, [CLI_PATH, ...args], {
-        encoding: "utf8",
-        env: { ...process.env },
-      });
+      spawnSync(
+        process.execPath,
+        ["--import", pathToFileURL(blockPath).href, CLI_PATH, ...args],
+        { encoding: "utf8", env: { ...process.env } },
+      );
     const unknown = spawnCli(["--bogus", "1"]);
     assert.equal(unknown.status, 1);
+    assert.equal(unknown.stderr.includes("BLOCKED-FETCH"), false);
     assert.equal(
       unknown.stdout.trim().split("\n").pop(),
       "전수 재조회: 거부 — 모르는 플래그: --bogus",
@@ -1238,6 +1252,11 @@ test("ⓖ CLI 스폰(망 0) -- 인자 거부 갈래 · 먼 미래 창 거부(시
       reportOut,
     ]);
     assert.equal(future.status, 1);
+    assert.equal(
+      future.stderr.includes("BLOCKED-FETCH"),
+      false,
+      "문이 닫혀 있으면 망 시도 자체가 없다",
+    );
     assert.match(
       future.stdout.trim().split("\n").pop(),
       /^전수 재조회: 거부 — 창이 아직 닫히지 않음\(창 끝 2099-01-08 00:00 KST 이후에 실행한다\)$/,
