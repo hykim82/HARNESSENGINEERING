@@ -1702,12 +1702,22 @@ function readStepImmediatelyAfterNpmTestStep(enforceYmlText) {
   if (stepBlock === null) return null;
   const idx = enforceYmlText.indexOf(stepBlock);
   if (idx === -1) return null;
-  const rest = enforceYmlText.slice(idx + stepBlock.length);
+  let rest = enforceYmlText.slice(idx + stepBlock.length);
   // No `^` anchor: the FIRST "- name:" occurrence in `rest` is, by
   // construction, the step immediately after stepBlock -- any blank lines
   // or comment lines between the two are simply text the search skips over,
   // not something that needs its own sub-pattern.
-  const m = rest.match(/(- name: .*\n(?:[ \t]{7,}\S.*\n?)*)/);
+  const STEP_RE = /(- name: .*\n(?:[ \t]{7,}\S.*\n?)*)/;
+  let m = rest.match(STEP_RE);
+  // HYK-459 (expectation updated, product_scope ⑷): the failure-only
+  // annotate step sits between the test step and the report step ON PURPOSE
+  // (it runs only after a red test step, so it never changes what the report
+  // step sees on a green run). Skip exactly that one named step; any other
+  // step wedged in between still fails the "very next step" guard.
+  while (m && /^- name: annotate failed test suites \(HYK-459 /.test(m[1])) {
+    rest = rest.slice(rest.indexOf(m[1]) + m[1].length);
+    m = rest.match(STEP_RE);
+  }
   return m ? m[1] : null;
 }
 

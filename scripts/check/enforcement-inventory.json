@@ -729,6 +729,21 @@
       "self_registration_note": "HYK-183-skipreview-count-1 self-registration, same convention as quality-check/nul-byte-guard above. This check is intentionally classified as a reporting/observability tool, not an enforcement gate -- review-gate.mjs's skip-review trailer logic and threshold were explicitly out of scope for this track (task instruction: count usage, do not add a new block)."
     },
     {
+      "id": "ci-fail-annotate",
+      "substrate": "manual",
+      "script": "scripts/check/ci-fail-annotate.mjs",
+      "test": "scripts/check/ci-fail-annotate.test.mjs",
+      "install_targets": [],
+      "expected_bad": "n/a -- this is an OBSERVER, not a gate. It never blocks a commit, PR, or CI run and never changes the job result: it runs only from enforce.yml's `if: failure()` step AFTER the `check test suites` step is already red, and it ALWAYS exits 0. It reads the per-run logs the test runner already writes (`.harness/full-runner-<N>.log` + `-serial.log`, highest N) and prints `::error file=<test file>,line=<n>,title=failed test::<test name>` workflow commands (at most 10, then one `::warning` count line), or ONE `::error title=failed tests not extracted::<reason>` when no name could be extracted (never a silent zero).",
+      "expected_good": "n/a -- `node scripts/check/ci-fail-annotate.mjs [<runner-log-dir>]` (default `.harness`) exits 0 for every input (missing dir, no log, empty/garbage log, fail 0, cut-off log) and prints at least one annotation line each time; annotations carry only test file paths, test names and counts -- names are scrubbed of VAR=value, token shapes, long opaque strings and the values of sensitive-named process env vars.",
+      "failure_exit": null,
+      "uncertain_exit": null,
+      "owner": "ORCH",
+      "claude_only": false,
+      "self_registration_note": "HYK-459-ci-fail-annot-1 self-registration (OBSERVER convention, same as skip-review-usage and anchor-seal-journal). Motivated by a real PR #389 CI failure: the red `check test suites` step's only annotation was 'Process completed with exit code 1' and the failed test names sat in a log that needs a GitHub login. Honesty: the workflow step cannot be run locally -- the first real CI failure is its first measurement; the spec/TAP output shapes were captured on Node v26 and CI pins Node 20 (not run here), so a reporter-shape difference degrades to the single 'could not extract' annotation; a long failure list is cut to 10 + a count line and the rest stays in the (login-gated) log (GitHub may also cap how many annotations it displays per step -- not measured here); an annotation is an observation, not a guarantee that every failure is named.",
+      "invocation_note": "Called by `.github/workflows/enforce.yml` step 'annotate failed test suites (HYK-459 ...)' (`if: failure()`, directly after the unchanged `check test suites` step); also runnable by hand against any directory holding full-runner-<N>.log files. Not hook-installed."
+    },
+    {
       "id": "hook-sync-check",
       "substrate": "manual",
       "script": "scripts/check/hook-sync-check.mjs",
@@ -799,6 +814,20 @@
       "owner": "ORCH",
       "claude_only": false,
       "self_registration_note": "HYK-406-wk-gate-1 self-registration (OBSERVER convention, same as usage-threshold-watch above). HYK-406 slice B repository share (owner ruling 2026-11-19 14:06 item 2). Honesty: install_targets is EMPTY on purpose -- applying the memory-gate patch (and so making this CLI a launch gate) is a SEPARATE submission and owner ruling; this slice only adds the read CLI and the patch document. NOT an anchor: the HUD files are written with the user's own permission and the ORCH can overwrite them too, so a low reading is not proof the weekly wallet is safe; the value is the freshest file that has one (which seat wrote it is not distinguishable); the freshness limit is 60 minutes and a stale value never closes the gate; an unobservable value OPENS the gate (fail-open, owner ruling) so a broken reader cannot stop all deliveries. The test drives a synthetic copy of the gate's anchor lines, not the real memory-gate.ps1 (measurement, Get-Counter and orca terminal create are not opened). See docs/enforcement-known-gaps.md gap#103."
+    },
+    {
+      "id": "anchor-seal-journal",
+      "substrate": "manual",
+      "script": "scripts/supervisor/anchor-seal.mjs",
+      "test": "scripts/supervisor/anchor-seal.test.mjs",
+      "install_targets": [],
+      "expected_bad": "n/a -- this is an OBSERVER / record step, not a gate and not (yet) a strong anchor. It never blocks a dispatch, commit, PR, or CI run. Default OFF: without the watch-run argument `--anchor-seal-remote` the step does not run at all and the watch.log line is byte-identical to before. When ON, each scheduled watch cycle folds the auxiliary sources of the five non-server gate types (relay outbox/inbox files, the reject-streak ledger + chain, the north-star coordinate file, interpreter-session typed turns) into one Merkle root per type and, ONLY when a root changed, appends one seal line (roots + time + the words none / read_error, no names, paths or bodies) to branch `anchor-seal` of the injected remote by a non-force push through the existing bot credential-helper method. Seals are not proof of who acted: they only fix 'this digest existed at this time'.",
+      "expected_good": "n/a -- run through the production cycle (`runWatchOnce` with `anchorSeal: {remote, sealDir, patFile, sources}`) with synthetic source directories and a local `git init --bare` remote: first cycle -> exactly one seal commit whose per-type roots equal a fresh recomputation; same sources again -> zero git calls (`unchanged`); one byte changed -> a second seal that mismatches the old one; a source that is missing -> `none`, unreadable -> `read_error` (never 0, never an empty root); the daily cap (24) stops pushing and reports the unsealed cycle count; a remote tip that is not a descendant of the last sealed commit -> `REWRITE_SUSPECT` and no push; the same root sealed twice -> the earliest line is canonical; a step failure -> `anchor-seal: FAILED reason=...` and the cycle continues; no marker string from the sources and no token value anywhere in the remote objects, child argv, logs or errors.",
+      "failure_exit": null,
+      "uncertain_exit": null,
+      "owner": "ORCH",
+      "claude_only": false,
+      "self_registration_note": "HYK-255-s1-anchor-seal-1 self-registration (OBSERVER convention, same as usage-threshold-watch above). HYK-255 slice S1 (owner ruling 2026-11-19 15:20, item B). Honesty: install_targets is EMPTY on purpose -- the scheduled task is NOT changed by this slice, no live push is made by this round, and the step is OFF unless the CLI argument is given, so today nothing is sealed. A seal only prevents AFTER-THE-FACT edits: content faked from the start is sealed as it was faked; the sealing credential (the bot) is in ORCH hands; until the human protects branch `anchor-seal` (no force push, no delete) the strength is WEAK because the bot can rewrite the branch (the writer only detects a rewrite it can see: remote tip not a descendant of the last sealed commit). The push time is not proven inside git objects (commit time is a local self-report) -- comparing against the server time is the reader's job (slice S2). Not counted as an independent anchor (ruling 1520 A). See docs/enforcement-known-gaps.md gap#104."
     },
     {
       "id": "orch-seat-boot-observer",

@@ -49,6 +49,8 @@ import {
   writeFileSync,
   mkdirSync,
   statSync,
+  renameSync,
+  unlinkSync,
 } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
@@ -59,6 +61,7 @@ import {
   measureRepoIdentity,
   readApproverAllowlist,
   APPROVAL_STATUS,
+  APPROVAL_REASON,
 } from "./approval-authority-adapter.mjs";
 import {
   loadEngineProfiles,
@@ -107,6 +110,7 @@ import {
   githubListCoversWindow,
   summarizeGithubList,
   summarizeChangeRequests,
+  extractChangeRequestRecords,
   assembleGithubHumanActions,
   computeMachineScope,
   parseKstClockMinutes,
@@ -127,7 +131,8 @@ export const DEFAULT_WINDOW_HOURS = 24;
 // (watch-run.mjs)는 이 기본값으로 부른다(상한 인자 없음). D1 상한(아래
 // DEFAULT_MAX_EXTERNAL_EVIDENCE_CHECKS 4)과 합쳐 회차당 최악 8 + 4 = 12 · 15분 회차 4개 =
 // 시간당 최악 48(익명 한도 60 중 나머지 12 는 책임자 CI 판독 몫). 옛 값은 3(= 회차당 최대 24).
-// 상한 밖 ㄱ-4 후보는 «미조회(예산)» 그대로다(숨김 0) -- 회차당 최신 1건만 조회한다.
+// 상한 밖 ㄱ-4 후보는 «미조회(예산)» 그대로다(숨김 0) -- 회차당 1건만 조회한다. HYK-255-c1-approval-cache-1 -- 그 1건은 더 이상 «언제나
+// 최신 1건» 이 아니라 판정 캐시가 고른다(아직 못 본 sha 먼저 · 아래 collectGate4Independent 앞 주석). 몫(1) 자체는 무변이다.
 export const DEFAULT_MAX_MERGE_CHECKS = 1;
 export const DEFAULT_ALLOWLIST_PATH =
   "scripts/supervisor/approver-allowlist.json";
@@ -634,6 +639,449 @@ export function collectMergeCandidates({ git, windowStartMs, windowEndMs }) {
   return { ok: true, candidates };
 }
 
+// ---------------------------------------------------------------------------
+// HYK-255-c1-approval-cache-1 (판정 #20261119-1406 ① · 1412 ①) -- ㄱ-4 승인 조회 «판정 캐시».
+//
+// 왜: 회차 조회 몫(DEFAULT_MAX_MERGE_CHECKS 1)은 «언제나 같은 앞자리(가장 새 병합)» 에 쓰였고, 창 안 나머지 병합은 끝내 조회되지
+// 않아 보고서가 «미조회(예산) N건 -- 미조회는 미계수다» 로 영구히 남았다. 이제 창 안 후보 sha 별 마지막 판정을 watch 상태 파일
+// 1개(partial-count-approval-cache.json)에 남기고, 회차 몫은 아직 못 본 sha 에 쓴다.
+//
+// ⓘ 고르는 순서(몫 안에서): ① 캐시에 없는 sha(후보 순 = 새 병합부터) ② UNDECIDABLE 이었던 sha(가장 오래 전에 본 것부터) ③ NOT_APPROVED
+//   인데 재확인 시한(NOT_APPROVED_RECHECK_MS)이 지난 sha(가장 오래 전에 본 것부터). APPROVED 는 다시 부르지 않고 재사용한다.
+// ⓘ NOT_APPROVED 재확인 시한 = 6시간 -- 근거: 병합 커밋의 «승인 여부» 는 이미 일어난 일이라 뒤집히는 길이 approver-allowlist(사람이 고치는
+//   파일)가 바뀔 때뿐이다. 그래서 자주 볼 이유가 없고(④ 조회 한 번 = 같은 IP 익명 한도 8회), 24시간 창 안에서 최대 4번이면 허용 목록 갱신을
+//   늦어도 6시간 안에 따라잡는다. 몫을 쓸 «새 sha · UNDECIDABLE» 이 없을 때만 돌아오는 ③ 순위라 새 병합을 밀어내지 않는다.
+// ⓘ 창 밖 sha 는 캐시에서 지운다(후보 목록을 «읽은» 회차에만 -- 후보 수집 실패 회차는 캐시를 건드리지 않는다).
+// ⓘ 캐시 없음 · 깨짐 · 읽기 실패 = 지금과 같은 동작(앞자리 조회 · 미조회 그대로 · ⛔0 으로 접지 않음) + 사유 1줄(보고서 «캐시 상태»).
+//   깨진 캐시는 그 회차 조회 결과로 다시 쓴다(고착 방지) -- 읽기 «실패»(권한 등)는 덮어쓰지 않는다.
+// ⛔예산 무변: 회차 몫(maxMergeChecks) · sha당 callBudget · P3 호출 순번은 이 캐시와 무관하다(이 캐시는 «어느 sha 에 몫을 쓰는가» 만 바꾼다).
+// ⚠️정직 한계: 캐시 파일은 ORCH 가 쓸 수 있는 watch 폴더의 파일이라 «독립 앵커» 가 아니다(승인 사실의 권위는 GitHub 응답이고, 캐시는 그
+//   응답을 «이전 회차에 한 번 받았다» 는 기억일 뿐이다). 보고서는 캐시에서 온 값을 «이번 회차 조회» 와 따로 적는다.
+// HYK-255-c1-approval-cache-2 (판정 #20261119-2020 · 검토 1R P1-1 수리) -- ㄴ «GitHub 사람 손» 의 변경 요청은 ㄱ-4 가 그 회차에 받은 리뷰 응답을
+//   읽어 센다. 캐시가 조회를 건너뛰면 그 응답이 사라져 ㄴ 분자가 내려갔다(1R). 그래서:
+//   ⑴ 양성 이월 -- 조회 때 받은 응답의 «사람 변경 요청 사건»(리뷰 식별자 · 작성자 · 제출 시각)을 그 sha 의 캐시 항목에 적고, 창 안에 있는 동안
+//      뒤 회차의 ㄴ 줄 · ㄴ 머리 분자에 그대로 센다(표기 = «이번 회차 확인 m건 · 이전 회차 확인 이월 n건(캐시)»). 새 응답을 받은 sha 의 기록은
+//      앞 기록 ∪ 새 기록(한 번 일어난 변경 요청은 그 뒤 기각돼도 분자를 낮추지 않는다).
+//   ⑵ 없다는 쪽은 이월하지 않는다 -- 변경 요청 0 은 항목에 적지 않는다. 캐시로 조회를 건너뛴 건수와 «새 변경 요청 미수집» 표지를 ㄴ 줄에 붙인다.
+//   ⑶ 열린 PR(어댑터 PR_NOT_MERGED) 항목은 캐시로 건너뛰지 않는다 -- 판정으로 재사용하지 않고, 조회 순서에서 가장 앞이다(매 회차 몫 안에서 조회).
+//      몫(회차당 조회 수)은 그대로이므로 조회 횟수는 늘지 않는다 -- 대신 열린 PR 이 남아 있는 동안 몫이 거기에 쓰여 새 sha 조회가 밀린다.
+//   ⚠️남는 한계(문면으로 보임): ⒜ 캐시가 건너뛴 PR 에 «나중에» 생긴 변경 요청은 읽지 못한다(그 회차 줄이 «캐시로 조회 s건 건너뜀 · 새 변경 요청
+//      미수집» 으로 알린다 · 끔보다 낮을 수 있는 유일한 방향) ⒝ 켬은 끔이 읽지 않는 PR(가장 새 병합 밖)의 변경 요청도 읽어 «더 셀» 수 있다(이번 회차
+//      확인 · 이월로 표지) ⒞ 캐시 항목은 ORCH 가 쓸 수 있는 파일이라 항목 하나를 위조해 양성 사건을 더하거나(ㄱ 숫자 증가 포함) 항목을 고쳐 양성
+//      사건을 지워 숨길 수 있다 -- 캐시 파일 봉인은 S1 뒤 별도(이 조각 범위 밖).
+// ---------------------------------------------------------------------------
+
+export const APPROVAL_CACHE_FILENAME = "partial-count-approval-cache.json";
+export const APPROVAL_CACHE_SCHEMA = "partial-count-approval-cache/v1";
+export const NOT_APPROVED_RECHECK_MS = 6 * 60 * 60 * 1000;
+const APPROVAL_CACHE_SHA_RE = /^[0-9a-f]{40}$/;
+const APPROVAL_STATUS_VALUES = new Set(Object.values(APPROVAL_STATUS));
+// 플랫폼마다 «파일 없음» 이 다른 코드로 온다(Windows = ENOENT · Linux 에서 파일 밑 경로 = ENOTDIR) -- 둘 다 «없음».
+const APPROVAL_CACHE_MISSING_CODES = new Set(["ENOENT", "ENOTDIR"]);
+
+// HYK-255-c1-approval-cache-2 -- 항목의 양성 변경 요청 기록(changeRequests · 없을 수 있다) 하나: 리뷰 식별자 · 작성자 · 제출 시각.
+function isValidChangeRequestRecord(rec) {
+  return (
+    rec !== null &&
+    typeof rec === "object" &&
+    typeof rec.id === "string" &&
+    rec.id !== "" &&
+    typeof rec.login === "string" &&
+    rec.login !== "" &&
+    Number.isFinite(rec.atMs)
+  );
+}
+
+function isValidApprovalCacheEntry(entry) {
+  return (
+    entry !== null &&
+    typeof entry === "object" &&
+    APPROVAL_STATUS_VALUES.has(entry.status) &&
+    Number.isFinite(entry.checkedAtMs) &&
+    (entry.changeRequests === undefined ||
+      (Array.isArray(entry.changeRequests) &&
+        entry.changeRequests.every(isValidChangeRequestRecord)))
+  );
+}
+
+// 열린 PR(어댑터 판정 PR_NOT_MERGED) 항목 -- 캐시로 건너뛰지 않는다: 이번 회차 조회가 아니면 판정으로 «재사용» 하지 않고(미조회로 남는다),
+// 다음 조회 순서에서는 가장 앞이다(planApprovalLookups). 캐시 생략은 «닫힌(병합) PR» 만의 일이다.
+const isOpenPrEntry = (entry) =>
+  entry?.status === APPROVAL_STATUS.UNDECIDABLE &&
+  entry.reason === APPROVAL_REASON.PR_NOT_MERGED;
+
+// 캐시 읽기 -- {state: "ok"|"missing"|"broken"|"unreadable", entries(Map), invalid, text, reason}. throw 0.
+function readApprovalCache({ cachePath, readFn }) {
+  let text;
+  try {
+    text = readFn(cachePath, "utf8");
+  } catch (err) {
+    return classifyApprovalCacheReadError(err);
+  }
+  return parseApprovalCacheText(text);
+}
+
+function classifyApprovalCacheReadError(err) {
+  if (APPROVAL_CACHE_MISSING_CODES.has(err?.code)) {
+    return { state: "missing", entries: new Map(), invalid: 0, text: null };
+  }
+  return {
+    state: "unreadable",
+    entries: new Map(),
+    invalid: 0,
+    text: null,
+    reason: oneLineReason(err?.message ?? err),
+  };
+}
+
+function isApprovalCacheShape(parsed) {
+  const raw = parsed?.entries;
+  return (
+    parsed?.schema === APPROVAL_CACHE_SCHEMA &&
+    raw !== null &&
+    typeof raw === "object" &&
+    !Array.isArray(raw)
+  );
+}
+
+function parseApprovalCacheText(text) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return brokenApprovalCache("JSON 아님");
+  }
+  if (!isApprovalCacheShape(parsed)) {
+    return brokenApprovalCache("스키마 불일치");
+  }
+  const entries = new Map();
+  let invalid = 0;
+  for (const [sha, entry] of Object.entries(parsed.entries)) {
+    if (APPROVAL_CACHE_SHA_RE.test(sha) && isValidApprovalCacheEntry(entry)) {
+      entries.set(sha, entry);
+    } else {
+      invalid += 1;
+    }
+  }
+  return { state: "ok", entries, invalid, text };
+}
+
+function brokenApprovalCache(reason) {
+  return {
+    state: "broken",
+    entries: new Map(),
+    invalid: 0,
+    text: null,
+    reason,
+  };
+}
+
+// 몫 안에서 조회할 후보 고르기(위 «고르는 순서»). 캐시가 비어 있으면 후보 순서 그대로 = 옛 «앞자리» 와 같다.
+// 순위(작을수록 먼저): -1 열린 PR(매 회차 · 캐시로 건너뛰지 않는다) · 0 캐시에 없는 sha · 1 UNDECIDABLE · 2 시한 지난 NOT_APPROVED · null 안 부름.
+function approvalLookupRank(e, nowMs) {
+  if (!e) return 0;
+  if (isOpenPrEntry(e)) return -1;
+  if (e.status === APPROVAL_STATUS.UNDECIDABLE) return 1;
+  if (
+    e.status === APPROVAL_STATUS.NOT_APPROVED &&
+    nowMs - e.checkedAtMs >= NOT_APPROVED_RECHECK_MS
+  ) {
+    return 2;
+  }
+  return null;
+}
+
+function planApprovalLookups({ candidates, entries, nowMs, budget }) {
+  const ranked = [];
+  candidates.forEach((c, idx) => {
+    const e = entries.get(c.sha);
+    const rank = approvalLookupRank(e, nowMs);
+    if (rank !== null) {
+      ranked.push({ c, idx, rank, at: e ? e.checkedAtMs : 0 });
+    }
+  });
+  ranked.sort((a, b) => a.rank - b.rank || a.at - b.at || a.idx - b.idx);
+  return ranked.slice(0, budget).map((r) => r.c);
+}
+
+// changeRequests = 이 항목이 «양성으로 확인한» 사람 변경 요청 기록(없으면 칸 자체를 쓰지 않는다 -- «없다» 는 적지 않는다).
+function approvalCacheEntryFromVerdict(verdict, nowMs, changeRequests = []) {
+  const evidence = verdict.evidence ?? {};
+  const entry = { status: verdict.status, checkedAtMs: nowMs };
+  if (verdict.status === APPROVAL_STATUS.APPROVED) {
+    entry.pullNumber = evidence.pull_number ?? null;
+    entry.reviewerLogin = evidence.reviewer_login ?? null;
+  } else if (evidence.reason) {
+    entry.reason = String(evidence.reason);
+  }
+  if (changeRequests.length > 0) entry.changeRequests = changeRequests;
+  return entry;
+}
+
+// HYK-255-c1-approval-cache-2 (판정 #20261119-2020) -- 양성 이월. 이번 회차에 조회한 sha 의 «받은 리뷰 응답» 에서 읽은 사람 변경 요청 기록을 항목에
+// 적고, 조회하지 않은 sha 는 앞 회차 항목의 기록을 그대로 둔다. 새 응답을 받은 sha 의 기록 = 앞 기록 ∪ 새 응답의 기록(리뷰 id 중복 1 -- 한 번
+// 일어난 «변경 요청» 사건은 그 뒤 리뷰가 기각돼도 사라지지 않는다 · 분자가 캐시 때문에 내려가지 않는다). 응답을 못 받은 조회(실패 · 조회 중단)는 앞
+// 기록을 지우지 않는다. 창 시작보다 오래된 기록은 다시는 셀 수 없으므로 버린다. ⛔없다(응답에 변경 요청 0)는 기록하지 않는다.
+function mergeChangeRequestRecords({ prior, reviewLists, windowStartMs }) {
+  const byId = new Map();
+  for (const rec of [
+    ...(Array.isArray(prior) ? prior : []),
+    ...extractChangeRequestRecords(reviewLists),
+  ]) {
+    if (rec.atMs >= windowStartMs && !byId.has(rec.id)) byId.set(rec.id, rec);
+  }
+  return [...byId.values()];
+}
+
+// 회차 끝 «최종 항목» 지도(창 안 후보 sha -> 항목) -- 캐시 저장과 이번 회차 이월 사건의 같은 원천.
+function buildFinalApprovalEntries({
+  candidates,
+  fresh,
+  freshReviews,
+  loaded,
+  nowMs,
+  windowStartMs,
+}) {
+  const finalEntries = new Map();
+  for (const c of candidates) {
+    const verdict = fresh.get(c.sha);
+    const prior = loaded.entries.get(c.sha);
+    const changeRequests = mergeChangeRequestRecords({
+      prior: prior?.changeRequests,
+      reviewLists: freshReviews.get(c.sha),
+      windowStartMs,
+    });
+    if (verdict) {
+      finalEntries.set(
+        c.sha,
+        approvalCacheEntryFromVerdict(verdict, nowMs, changeRequests),
+      );
+    } else if (prior) {
+      const kept = { ...prior };
+      delete kept.changeRequests;
+      if (changeRequests.length > 0) kept.changeRequests = changeRequests;
+      finalEntries.set(c.sha, kept);
+    }
+  }
+  return finalEntries;
+}
+
+// 조회 한 건이 «받은» PR 리뷰 응답(성공 · 배열)을 읽기만 해서 sha 별로 모으는 감싼 fetchJson -- 응답은 그대로 돌려준다(새 호출 0).
+function captureReviewLists(fetchJson) {
+  let current = [];
+  return {
+    fetchJson: (args) => {
+      const pending = fetchJson(args);
+      if (!PULL_REVIEWS_URL_RE.test(String(args?.url ?? ""))) return pending;
+      return Promise.resolve(pending).then((resp) => {
+        if (resp && resp.ok === true && Array.isArray(resp.json)) {
+          current.push(resp.json);
+        }
+        return resp;
+      });
+    },
+    take: () => {
+      const taken = current;
+      current = [];
+      return taken;
+    },
+  };
+}
+
+// 원자 쓰기(임시 파일 -> rename) -- 실패는 사유 문자열(throw 0 · 이번 회차 값은 이미 정해졌다).
+function writeApprovalCache({ cachePath, text }) {
+  const tmp = `${cachePath}.${process.pid}.tmp`;
+  try {
+    mkdirSync(path.dirname(cachePath), { recursive: true });
+    writeFileSync(tmp, text, "utf8");
+    renameSync(tmp, cachePath);
+    return null;
+  } catch (err) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      // 임시 파일이 안 만들어졌으면 지울 것도 없다.
+    }
+    return `캐시 저장 실패(${oneLineReason(err?.message ?? err)})`;
+  }
+}
+
+// 캐시 경로 해석 -- 주입(approvalCachePath: 문자열 = 그 경로 · null = 끔)이 우선. 주입이 «없으면» 감시 로그 형제 파일(이미 쓰는 감시 상태
+// 파일 reach-notify-state.json 과 같은 watch 폴더 규칙 · readExternalEvidencePrevious 선례). watchLogPath 도 주지 않은 호출(사람의 기본
+// CLI 실행 · 옛 호출자)은 캐시 0 = 옛 동작 그대로이고 «기본 실행은 아무 파일도 쓰지 않는다» 는 계약도 지켜진다.
+export function resolveApprovalCachePath(options) {
+  if (options.approvalCachePath !== undefined) return options.approvalCachePath;
+  return options.watchLogPath
+    ? path.join(path.dirname(options.watchLogPath), APPROVAL_CACHE_FILENAME)
+    : null;
+}
+
+// 후보 한 건의 이번 회차 판정 출처 -> {verdict, fromCache} | null(미조회).
+function pickCandidateVerdict({ sha, fresh, entries }) {
+  const looked = fresh.get(sha);
+  if (looked) return { verdict: looked, fromCache: false };
+  const entry = entries.get(sha);
+  // 열린 PR 항목은 캐시로 건너뛰지 않는다 -- 이번 회차에 조회하지 못했으면 판정으로 재사용하지 않고 미조회로 남긴다.
+  if (!entry || isOpenPrEntry(entry)) return null;
+  return {
+    verdict: {
+      status: entry.status,
+      evidence: {
+        pull_number: entry.pullNumber ?? undefined,
+        reviewer_login: entry.reviewerLogin ?? undefined,
+        reason: entry.reason,
+      },
+    },
+    fromCache: true,
+  };
+}
+
+// 후보 순서대로 판정을 모아 셈 -- 이번 회차 조회분과 캐시 재사용분을 «따로» 센다.
+function tallyApprovalVerdicts({ candidates, fresh, entries }) {
+  const t = {
+    approved: 0,
+    notApproved: 0,
+    undecidable: 0,
+    unchecked: 0,
+    approvedEvents: [],
+    reusedApproved: 0,
+    reusedNotApproved: 0,
+    reusedUndecidable: 0,
+    openPrNotReused: 0,
+    reasonVerdicts: [],
+  };
+  for (const c of candidates) {
+    const picked = pickCandidateVerdict({ sha: c.sha, fresh, entries });
+    if (picked) tallyPickedVerdict(t, c.sha, picked);
+    else tallyUnchecked(t, entries.get(c.sha));
+  }
+  return t;
+}
+
+// 이번 회차 판정을 쥐지 못한 후보 -- 미조회(예산)로 센다. 열린 PR 항목이면 «캐시로 건너뛰지 않음» 건수도 센다.
+function tallyUnchecked(t, entry) {
+  t.unchecked += 1;
+  t.openPrNotReused += isOpenPrEntry(entry) ? 1 : 0;
+}
+
+function tallyPickedVerdict(t, sha, { verdict, fromCache }) {
+  const reused = fromCache ? 1 : 0;
+  if (verdict.status === APPROVAL_STATUS.APPROVED) {
+    t.approved += 1;
+    t.reusedApproved += reused;
+    t.approvedEvents.push({
+      sha,
+      pullNumber: verdict.evidence?.pull_number ?? "?",
+      reviewerLogin: verdict.evidence?.reviewer_login ?? "?",
+      fromCache,
+    });
+  } else if (verdict.status === APPROVAL_STATUS.NOT_APPROVED) {
+    t.notApproved += 1;
+    t.reusedNotApproved += reused;
+  } else {
+    t.undecidable += 1;
+    t.reusedUndecidable += reused;
+    t.reasonVerdicts.push(verdict);
+  }
+}
+
+// 회차 끝 캐시 저장 -- 창 안 후보만 남긴다(창 밖 sha 정리). 내용이 그대로면 쓰지 않는다. 읽기 «실패» 회차는 덮어쓰지 않는다.
+function persistApprovalCache({ cachePath, loaded, finalEntries }) {
+  if (loaded.state === "unreadable") return null;
+  const entries = Object.fromEntries(finalEntries);
+  // 캐시가 «없는» 채로 저장할 항목도 없으면(창 안 후보 0 · 몫 0) 빈 파일을 만들지 않는다 -- 깨진 캐시는 빈 항목이어도 다시 쓴다.
+  if (loaded.state === "missing" && finalEntries.size === 0) {
+    return null;
+  }
+  const text = `${JSON.stringify({ schema: APPROVAL_CACHE_SCHEMA, entries }, null, 2)}\n`;
+  if (text === loaded.text) return null;
+  return writeApprovalCache({ cachePath, text });
+}
+
+// 보고서 «캐시 상태» 1줄 재료 -- 정상 회차(없음 · 깨짐 · 무효 · 저장 실패 모두 아님)에는 비어 있다.
+function approvalCacheNotes({
+  loaded,
+  saveFailure,
+  candidateCount,
+  openPrNotReused,
+}) {
+  const notes = [];
+  // «없음» 은 앞자리 조회로 물러난 사실을 알리는 줄이라 고를 후보가 0 이면(물러날 동작이 없다) 내지 않는다.
+  if (loaded.state === "missing" && candidateCount > 0) {
+    notes.push(
+      "캐시 없음(첫 회차 또는 파일 없음) — 지금과 같은 동작(앞자리 조회) · 이번 회차 조회 결과로 새로 저장",
+    );
+  } else if (loaded.state === "broken") {
+    notes.push(
+      `캐시 깨짐(${loaded.reason}) — 지금과 같은 동작(앞자리 조회 · 미조회 그대로) · 이번 회차 조회 결과로 다시 저장`,
+    );
+  } else if (loaded.state === "unreadable") {
+    notes.push(
+      `캐시 읽기 실패(${loaded.reason}) — 지금과 같은 동작(앞자리 조회 · 미조회 그대로) · 이번 회차 캐시 저장 안 함`,
+    );
+  }
+  if (loaded.invalid > 0) {
+    notes.push(`무효 항목 ${loaded.invalid}개 무시(다시 조회 대상)`);
+  }
+  if (openPrNotReused > 0) {
+    notes.push(
+      `열린 PR ${openPrNotReused}건은 캐시로 건너뛰지 않음(재사용 안 함 · 이번 회차 조회 못 했으면 미조회로 셈)`,
+    );
+  }
+  if (saveFailure) notes.push(saveFailure);
+  return notes;
+}
+
+// 회차 끝 캐시 마무리 -- 최종 항목 지도를 만들고(저장 원천 = 이월 사건 원천) 저장한 뒤 보고용 `gate4.cache` 값을 돌려준다.
+// carriedChangeRequests = 창 안 후보 항목에 적힌 양성 변경 요청 기록 전부(이번 회차 응답에서 읽은 것 포함 -- 세는 쪽이 같은 id 중복 1 로 이번 회차
+// 확인과 이월을 가른다). skippedLookups = 캐시 판정을 재사용해 조회를 건너뛴 건수(= reused).
+function finishApprovalCache({
+  approvalCache,
+  loaded,
+  candidates,
+  fresh,
+  freshReviews,
+  tally,
+  lookedUp,
+  nowMs,
+  windowStartMs,
+}) {
+  const finalEntries = buildFinalApprovalEntries({
+    candidates,
+    fresh,
+    freshReviews,
+    loaded,
+    nowMs,
+    windowStartMs,
+  });
+  const saveFailure = persistApprovalCache({
+    cachePath: approvalCache.path,
+    loaded,
+    finalEntries,
+  });
+  const reused =
+    tally.reusedApproved + tally.reusedNotApproved + tally.reusedUndecidable;
+  return {
+    active: true,
+    lookedUp,
+    reused,
+    reusedApproved: tally.reusedApproved,
+    reusedNotApproved: tally.reusedNotApproved,
+    reusedUndecidable: tally.reusedUndecidable,
+    openPrNotReused: tally.openPrNotReused,
+    skippedLookups: reused,
+    carriedChangeRequests: [...finalEntries.values()].flatMap(
+      (e) => e.changeRequests ?? [],
+    ),
+    notes: approvalCacheNotes({
+      loaded,
+      saveFailure,
+      candidateCount: candidates.length,
+      openPrNotReused: tally.openPrNotReused,
+    }),
+  };
+}
+
 export async function collectGate4Independent({
   fetchJson,
   git,
@@ -641,6 +1089,7 @@ export async function collectGate4Independent({
   windowStartMs,
   windowEndMs,
   maxMergeChecks,
+  approvalCache = null,
 }) {
   const cand = collectMergeCandidates({ git, windowStartMs, windowEndMs });
   if (!cand.ok) {
@@ -648,47 +1097,75 @@ export async function collectGate4Independent({
   }
   // ★수집기 라이브 결선 지점: 헤더상 live=false였던
   // approval-authority-adapter.mjs를 여기서 실제로 부른다.
-  const port = createGitHubApprovalPort({ fetchJson, git, allowlistPath });
-  const toCheck = cand.candidates.slice(0, Math.max(0, maxMergeChecks));
-  let approved = 0;
-  let notApproved = 0;
-  let undecidable = 0;
-  const approvedEvents = [];
+  // 캐시를 켠 회차만 «조회 한 건이 받은 리뷰 응답» 을 읽기만 해서 sha 별로 모은다(양성 변경 요청을 캐시 항목에 적기 위함 · 새 호출 0).
+  const capture = approvalCache ? captureReviewLists(fetchJson) : null;
+  const port = createGitHubApprovalPort({
+    fetchJson: capture ? capture.fetchJson : fetchJson,
+    git,
+    allowlistPath,
+  });
+  const budget = Math.max(0, maxMergeChecks);
+  // 캐시 없음(주입 0) = 옛 동작 그대로: 후보 앞자리 budget 건. 캐시 있음 = 위 고르는 순서(캐시가 비면 같은 앞자리).
+  const loaded = approvalCache
+    ? readApprovalCache({
+        cachePath: approvalCache.path,
+        readFn: approvalCache.readFn,
+      })
+    : { state: "off", entries: new Map(), invalid: 0, text: null };
+  const toCheck = planApprovalLookups({
+    candidates: cand.candidates,
+    entries: loaded.entries,
+    nowMs: windowEndMs,
+    budget,
+  });
   const verdicts = [];
+  const fresh = new Map();
+  const freshReviews = new Map();
   for (const c of toCheck) {
     const verdict = await port.isHumanApproved(c.sha);
     verdicts.push({ sha: c.sha, ...verdict });
-    if (verdict.status === APPROVAL_STATUS.APPROVED) {
-      approved += 1;
-      approvedEvents.push({
-        sha: c.sha,
-        pullNumber: verdict.evidence?.pull_number ?? "?",
-        reviewerLogin: verdict.evidence?.reviewer_login ?? "?",
-      });
-    } else if (verdict.status === APPROVAL_STATUS.NOT_APPROVED) {
-      notApproved += 1;
-    } else {
-      undecidable += 1;
-    }
+    fresh.set(c.sha, verdict);
+    if (capture) freshReviews.set(c.sha, capture.take());
   }
-  return {
+  const t = tallyApprovalVerdicts({
+    candidates: cand.candidates,
+    fresh,
+    entries: loaded.entries,
+  });
+  const out = {
     known: true,
     candidatesInWindow: cand.candidates.length,
     checked: toCheck.length,
-    approved,
-    notApproved,
-    undecidable,
-    uncheckedByBudget: cand.candidates.length - toCheck.length,
-    approvedEvents,
+    approved: t.approved,
+    notApproved: t.notApproved,
+    undecidable: t.undecidable,
+    uncheckedByBudget: t.unchecked,
+    approvedEvents: t.approvedEvents,
     verdicts,
-    undecidableReasons: summarizeUndecidableReasons(verdicts),
+    undecidableReasons: summarizeUndecidableReasons(t.reasonVerdicts),
+  };
+  if (!approvalCache) return out;
+  return {
+    ...out,
+    cache: finishApprovalCache({
+      approvalCache,
+      loaded,
+      candidates: cand.candidates,
+      fresh,
+      freshReviews,
+      tally: t,
+      lookedUp: toCheck.length,
+      nowMs: windowEndMs,
+      windowStartMs,
+    }),
   };
 }
 
 // HYK-255-g-aux-render-1 커밋 2 (D3 ⑵) -- UNDECIDABLE 판정의 사유 분포. 사유는
 // 위 루프가 이미 받은 판정(verdict.evidence.reason -- approval-authority-adapter
 // 의 APPROVAL_REASON 코드)에서 읽을 뿐이고 새 REST 호출은 없다. 사유가 없는
-// 판정은 «사유 미상» 으로 센다(조용히 빼지 않는다).
+// 판정은 «사유 미상» 으로 센다(조용히 빼지 않는다). HYK-255-c1-approval-cache-1 --
+// 캐시에서 재사용한 UNDECIDABLE 판정도 같은 분포에 들어간다(저장된 사유 코드).
 function summarizeUndecidableReasons(verdicts) {
   const reasons = {};
   for (const v of verdicts) {
@@ -1049,7 +1526,8 @@ async function collectExternalEvidenceSafely(args) {
 //   · «미조회(예산)»(0 아님). 호출 순서 = 기존 둘 먼저 · P3 마지막(collectPartialCountInputs 가 호출 수를 세는 fetchJson 으로 셋을 이어
 //   부른다). 몫 0 이면 호출 0 · «미조회(예산)».
 // ⓘⓘⓘⓘ 변경 요청 = 새 조회 없이 ㄱ-4 가 이미 받은 PR 리뷰 응답(`/pulls/<n>/reviews`)의 `state` 만 읽는다(meterFetchJson 이 그 응답을 «읽기만»
-//   들고 있다) -- 읽은 PR 이 없으면 «미수집»(0 아님).
+//   들고 있다) -- 읽은 PR 이 없으면 «미수집»(0 아님). HYK-255-c1-approval-cache-2 -- ㄱ-4 판정 캐시를 켠 회차는 이전 회차에 확인해 캐시 항목에 적어 둔
+//   양성 사건도 창 안에서 센다(이월 · 위 «캐시» 주석 ⑴ ⑵).
 // ⚠️정직 한계: 닫은 행위자 칸이 없어 미병합 닫기는 봇이 닫은 것도 센다(부풀리는 쪽) · 대화 댓글은 PR · 이슈 구분 없이 센다 · 변경 요청은 ㄱ-4 가
 //   읽은 PR(회차당 최신 병합 1건) 한정 · 응답 칸 목록은 책임자 실측 표본(병합 뒤 첫 회차가 처음 실물). 웹 화면만 본 행위(로그 읽기 · 재실행 버튼
 //   등)는 목록에 흔적이 없다. 봇 목록에 없는 앱 계정(`…[bot]`)은 사람으로 센다(부풀리는 쪽 · 목록 추가는 사람 결정).
@@ -1515,6 +1993,9 @@ export async function collectGithubHumanActions({
   budget,
   // ㄱ-4 가 이미 받은 PR 리뷰 응답 배열들(추가 조회 0). 없으면 변경 요청 = 미수집.
   reviewLists = [],
+  // HYK-255-c1-approval-cache-2 -- ㄱ-4 판정 캐시를 켠 회차만 {records: 이전 회차에 확인해 캐시 항목에 적어 둔 양성 변경 요청 기록들,
+  // skipped: 캐시로 조회를 건너뛴 건수}. null = 캐시 없음(옛 동작 · 옛 문면).
+  changeRequestCarry = null,
 }) {
   if (!(budget >= 1)) return githubUnchecked("예산");
   const repo = await readExternalEvidenceAllowlist({ git, allowlistPath });
@@ -1553,12 +2034,16 @@ export async function collectGithubHumanActions({
   return {
     ...assembleGithubHumanActions({
       listResults: counted,
-      changeRequests: summarizeChangeRequests({
-        reviewLists,
-        botLogins: bots.logins,
-        windowStartMs,
-        windowEndMs,
-      }),
+      changeRequests: {
+        ...summarizeChangeRequests({
+          reviewLists,
+          carriedRecords: changeRequestCarry?.records,
+          botLogins: bots.logins,
+          windowStartMs,
+          windowEndMs,
+        }),
+        cacheSkipped: changeRequestCarry ? changeRequestCarry.skipped : null,
+      },
       windowStartMs,
       windowEndMs,
     }),
@@ -3250,7 +3735,12 @@ function resolveValueOptions(options) {
   return {
     now: options.now ?? Date.now(),
     windowHours: options.windowHours ?? DEFAULT_WINDOW_HOURS,
-    maxMergeChecks: options.maxMergeChecks ?? DEFAULT_MAX_MERGE_CHECKS,
+    // HYK-255-c1-approval-cache-1 -- ㄱ-4 조회 옵션 묶음 {maxMergeChecks(몫 · 무변), approvalCachePath(판정 캐시 파일 경로 · null = 끔 = 옛 동작)}.
+    // 해석 규칙은 resolveApprovalCachePath. 한 덩어리로 넘기는 것은 runPartialCountOnce 의 eslint max-lines-per-function 예산 때문이다.
+    gate4Options: {
+      maxMergeChecks: options.maxMergeChecks ?? DEFAULT_MAX_MERGE_CHECKS,
+      approvalCachePath: resolveApprovalCachePath(options),
+    },
     maxExternalEvidenceChecks:
       options.maxExternalEvidenceChecks ?? DEFAULT_MAX_EXTERNAL_EVIDENCE_CHECKS,
     repoRoot: options.repoRoot ?? process.cwd(),
@@ -3496,7 +3986,7 @@ async function collectPartialCountInputs({
   git,
   allowlistPath,
   githubBotAccountsPath,
-  maxMergeChecks,
+  gate4Options,
   maxExternalEvidenceChecks,
   readFn,
   readdirFn,
@@ -3534,7 +4024,7 @@ async function collectPartialCountInputs({
     githubBotAccountsPath,
     windowStartMs,
     windowEndMs,
-    maxMergeChecks,
+    ...gate4Options,
     maxExternalEvidenceChecks,
     watchLogPath,
     readFn,
@@ -3553,6 +4043,7 @@ async function collectRestObservations({
   windowStartMs,
   windowEndMs,
   maxMergeChecks,
+  approvalCachePath,
   maxExternalEvidenceChecks,
   watchLogPath,
   readFn,
@@ -3566,6 +4057,9 @@ async function collectRestObservations({
     windowStartMs,
     windowEndMs,
     maxMergeChecks,
+    approvalCache: approvalCachePath
+      ? { path: approvalCachePath, readFn }
+      : null,
   });
   // HYK-255-ln-github-anchor-1 -- ㄱ-4 와 독립인 ㄴ 후보 수집기(자기 상한).
   const externalEvidence = attachExternalEvidenceStale({
@@ -3590,6 +4084,13 @@ async function collectRestObservations({
     windowEndMs,
     budget: githubHumanBudget(meter.calls()),
     reviewLists: meter.reviewLists(),
+    changeRequestCarry:
+      gate4.cache?.active === true
+        ? {
+            records: gate4.cache.carriedChangeRequests,
+            skipped: gate4.cache.skippedLookups,
+          }
+        : null,
   });
   return { gate4, externalEvidence, githubHumanActions };
 }
@@ -3653,7 +4154,7 @@ export async function runPartialCountOnce(options = {}) {
   const {
     now,
     windowHours,
-    maxMergeChecks,
+    gate4Options,
     maxExternalEvidenceChecks,
     repoRoot,
     dispatchReceiptsPath,
@@ -3680,7 +4181,6 @@ export async function runPartialCountOnce(options = {}) {
   } = resolvePortOptions(options, repoRoot);
   const windowEndMs = now;
   const windowStartMs = now - windowHours * 60 * 60 * 1000;
-
   const inputs = await collectPartialCountInputs({
     windowStartMs,
     windowEndMs,
@@ -3694,14 +4194,13 @@ export async function runPartialCountOnce(options = {}) {
     git,
     allowlistPath,
     githubBotAccountsPath,
-    maxMergeChecks,
+    gate4Options,
     maxExternalEvidenceChecks,
     readFn,
     readdirFn,
     existsFn,
     gitWorktreeListExecFn,
   });
-
   const aux = resolveAuxCollectorResults({
     outboxDir,
     relayGlob,
@@ -3715,7 +4214,6 @@ export async function runPartialCountOnce(options = {}) {
     statFn,
     existsFn,
   });
-
   // inputs = {deliveredResult, consumedResult, watch, gate4, externalEvidence, githubHumanActions}
   return buildPartialCountOnceResult({
     now,

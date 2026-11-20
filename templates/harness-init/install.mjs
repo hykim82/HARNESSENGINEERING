@@ -1254,6 +1254,13 @@ export const ENFORCEMENT_CHECK_FILES = [
   // package.json copy are both unconfirmed on a target.
   "nul-byte-guard.mjs",
   "live-harness-scratch-guard.mjs",
+  // HYK-459-ci-fail-annot-1: enforce.yml's failure-only annotate step calls
+  // `node scripts/check/ci-fail-annotate.mjs .harness`; without this copy an
+  // installed solo-full target's CI would be red on that step. The script has
+  // no sibling imports; its paired test imports runner-receipt-writer.mjs
+  // (already listed below) and reads the copied enforce.yml.
+  "ci-fail-annotate.mjs",
+  "ci-fail-annotate.test.mjs",
   // HYK-209-frame-repair-1 ⓐ': the closure check below found these THREE
   // pre-existing gaps -- review-gate.mjs imports envelope-archive.mjs and
   // review-approval-binding.mjs; relay-handshake.test.mjs imports
