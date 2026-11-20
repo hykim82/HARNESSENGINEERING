@@ -118,6 +118,27 @@ jobs:
           HARNESS_FULL_AMBIENT_SWEEP: "1"
           HARNESS_AMBIENT_SWEEP_MARKER: ${{ runner.temp }}/ambient-sweep-ran.json
 
+      # HYK-459: observer, not a gate. When the step above is red its only
+      # annotation is "Process completed with exit code 1" and the failed test
+      # names sit in a log that needs a GitHub login. The test step itself is
+      # unchanged (same command, no pipe), so its exit code is untouched by
+      # construction. The runner it calls already writes the per-run logs
+      # .harness/full-runner-<N>.log and -serial.log inside the checkout
+      # (isolated-suite-runner.mjs allocates the slot under join(root,
+      # ".harness")); this step reads the highest-numbered pair and turns the
+      # failed test files/names into check-run annotations readable without a
+      # login. It runs only after a failure, the script always exits 0, and a
+      # failure to even start it is itself turned into an annotation, so the
+      # job result stays exactly what the test step decided. Annotations carry
+      # test file paths, test names and counts only; at most 10 are shown, then
+      # one count line; no readable log -> one "could not extract" annotation.
+      # Honest limit: this workflow cannot be run locally -- the first real CI
+      # failure is its first measurement.
+      - name: annotate failed test suites (HYK-459 observer -- failure only, always exit 0)
+        if: failure()
+        run: |
+          node scripts/check/ci-fail-annotate.mjs .harness || echo "::error title=failed tests not extracted::the annotate script itself failed to run -- open the step log"
+
       # HYK-477-ambient-sweep-report-1: self-report of whether the full
       # nested sweep above actually ran. No step-skip condition and no
       # soft-fail escape hatch here on purpose -- a missing/stale/malformed

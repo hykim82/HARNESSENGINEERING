@@ -729,6 +729,21 @@
       "self_registration_note": "HYK-183-skipreview-count-1 self-registration, same convention as quality-check/nul-byte-guard above. This check is intentionally classified as a reporting/observability tool, not an enforcement gate -- review-gate.mjs's skip-review trailer logic and threshold were explicitly out of scope for this track (task instruction: count usage, do not add a new block)."
     },
     {
+      "id": "ci-fail-annotate",
+      "substrate": "manual",
+      "script": "scripts/check/ci-fail-annotate.mjs",
+      "test": "scripts/check/ci-fail-annotate.test.mjs",
+      "install_targets": [],
+      "expected_bad": "n/a -- this is an OBSERVER, not a gate. It never blocks a commit, PR, or CI run and never changes the job result: it runs only from enforce.yml's `if: failure()` step AFTER the `check test suites` step is already red, and it ALWAYS exits 0. It reads the per-run logs the test runner already writes (`.harness/full-runner-<N>.log` + `-serial.log`, highest N) and prints `::error file=<test file>,line=<n>,title=failed test::<test name>` workflow commands (at most 10, then one `::warning` count line), or ONE `::error title=failed tests not extracted::<reason>` when no name could be extracted (never a silent zero).",
+      "expected_good": "n/a -- `node scripts/check/ci-fail-annotate.mjs [<runner-log-dir>]` (default `.harness`) exits 0 for every input (missing dir, no log, empty/garbage log, fail 0, cut-off log) and prints at least one annotation line each time; annotations carry only test file paths, test names and counts -- names are scrubbed of VAR=value, token shapes, long opaque strings and the values of sensitive-named process env vars.",
+      "failure_exit": null,
+      "uncertain_exit": null,
+      "owner": "ORCH",
+      "claude_only": false,
+      "self_registration_note": "HYK-459-ci-fail-annot-1 self-registration (OBSERVER convention, same as skip-review-usage and anchor-seal-journal). Motivated by a real PR #389 CI failure: the red `check test suites` step's only annotation was 'Process completed with exit code 1' and the failed test names sat in a log that needs a GitHub login. Honesty: the workflow step cannot be run locally -- the first real CI failure is its first measurement; the spec/TAP output shapes were captured on Node v26 and CI pins Node 20 (not run here), so a reporter-shape difference degrades to the single 'could not extract' annotation; a long failure list is cut to 10 + a count line and the rest stays in the (login-gated) log (GitHub may also cap how many annotations it displays per step -- not measured here); an annotation is an observation, not a guarantee that every failure is named.",
+      "invocation_note": "Called by `.github/workflows/enforce.yml` step 'annotate failed test suites (HYK-459 ...)' (`if: failure()`, directly after the unchanged `check test suites` step); also runnable by hand against any directory holding full-runner-<N>.log files. Not hook-installed."
+    },
+    {
       "id": "hook-sync-check",
       "substrate": "manual",
       "script": "scripts/check/hook-sync-check.mjs",

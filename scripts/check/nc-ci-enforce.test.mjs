@@ -99,7 +99,16 @@ function hasContinueOnError(text) {
 // quality_base step uses shell `if` for its base-SHA resolution, which is
 // not a step-skip condition and must not trip this detector.
 function hasStepLevelIf(text) {
-  return /^[ \t]*if:[ \t]/m.test(text);
+  // HYK-459 (expectation updated, product_scope ⑷): exactly ONE named
+  // observer step may carry `if: failure()` -- it runs only AFTER a red test
+  // step and its script always exits 0, so it can neither skip a check nor
+  // change the job result. Any other `if:` (or a different condition on that
+  // step, e.g. `always()`) is still a violation.
+  const withoutObserver = text.replace(
+    /^([ \t]*- name: annotate failed test suites \(HYK-459 [^\n]*\n)[ \t]*if: failure\(\)[ \t]*\n/m,
+    "$1",
+  );
+  return /^[ \t]*if:[ \t]/m.test(withoutObserver);
 }
 function hasGitleaksChecksumPin(text) {
   return /GITLEAKS_SHA256/.test(text);
