@@ -1817,10 +1817,12 @@ test("⒀ ⑷ 망 호출 한도 = 30 초가 실제 spawn 옵션 timeout 으로 �
   assert.equal(res.status, 0);
 });
 
-test("⒀ ⑷ 회차 최악 시간 상한 -- 봉인 한 회차의 git 호출은 최대 10 번 · 10 × 한도 < 900 초(생존 기록 신선도 기본 한도)", async () => {
-  const seal = await loadSeal();
+// 봉인 한 회차의 git 호출 수를 회차 모양별로 잰다(실제 runAnchorSealOnce 경로 + 실제 기본
+// git 함수 + 실제 git · mkdtemp 로컬 bare 원격). 호출 수 칸과 상한 칸이 같은 실측을 쓴다.
+async function measureSealCallCounts(seal) {
+  let counts = [];
   await withWorldAsync(async (w) => {
-    const counts = [];
+    counts = [];
     const counting = () => {
       let n = 0;
       return {
@@ -1832,7 +1834,10 @@ test("⒀ ⑷ 회차 최악 시간 상한 -- 봉인 한 회차의 git 호출은 
       };
     };
     // 가: 원격에 가지가 없는 첫 봉인 · 나: 원천을 바꾼 둘째 봉인(원격 끝 있음) ·
-    // 다: 상태 파일과 전용 git 디렉터리를 잃은 뒤(원격 끝을 이어받는 가장 긴 경로).
+    // 다: 상태 파일과 전용 git 디렉터리를 «둘 다» 잃은 뒤(원격 끝을 이어받는다 · merge-base 없음) ·
+    // 라: 전용 git 디렉터리만 잃고 상태 파일(lastCommit)은 남은 뒤(init 과 merge-base 가 «함께»
+    //     나오는 가장 긴 경로 -- init 은 «전용 디렉터리 없음», merge-base 는 «상태에 lastCommit +
+    //     원격 끝 있음» 으로 정해져 서로 독립이다).
     const a = counting();
     cycle(w, T0, { gitFn: a.fn });
     counts.push(a.n());
@@ -1846,18 +1851,42 @@ test("⒀ ⑷ 회차 최악 시간 상한 -- 봉인 한 회차의 git 호출은 
     const c = counting();
     cycle(w, T0 + 2 * MIN, { gitFn: c.fn });
     counts.push(c.n());
-    // 가 9 번(init · symbolic-ref · ls-remote · rev-parse · read-tree · add · commit · rev-parse ·
-    // push) · 나 10 번(symbolic-ref · ls-remote · fetch · merge-base · update-ref · reset · add ·
-    // commit · rev-parse · push) · 다 10 번(init · symbolic-ref · ls-remote · fetch · update-ref ·
-    // reset · add · commit · rev-parse · push). init 과 merge-base 는 같은 회차에 함께 나오지
-    // 않으므로 한 회차 최대는 10 번이다. 이 값이 바뀌면(git 호출이 늘면) 아래 최악 시간 계산을
-    // 다시 해야 한다 -- 그래서 «정확한 값» 으로 못 박는다.
-    assert.deepEqual(counts, [9, 10, 10]);
-    const worstCalls = Math.max(...counts);
-    assert.equal(worstCalls, 10);
-    assert.ok(
-      worstCalls * seal.GIT_CALL_TIMEOUT_MS < 900_000,
-      `최악 ${worstCalls} × ${seal.GIT_CALL_TIMEOUT_MS}ms 가 900 초 이상이다`,
-    );
+    fs.rmSync(w.sealDir, { recursive: true, force: true });
+    fs.appendFileSync(w.northStarFile, "changed-third\n");
+    const d = counting();
+    cycle(w, T0 + 3 * MIN, { gitFn: d.fn });
+    counts.push(d.n());
   });
+  return counts;
+}
+
+test("⒀ ⑷ 회차 호출 수 -- 봉인 한 회차의 git 호출은 모양별 정확한 값 [9, 10, 10, 11] · 최대 11 번", async () => {
+  const seal = await loadSeal();
+  const counts = await measureSealCallCounts(seal);
+  // 가 9 번(init · symbolic-ref · ls-remote · rev-parse · read-tree · add · commit · rev-parse ·
+  // push) · 나 10 번(symbolic-ref · ls-remote · fetch · merge-base · update-ref · reset · add ·
+  // commit · rev-parse · push) · 다 10 번(init · symbolic-ref · ls-remote · fetch · update-ref ·
+  // reset · add · commit · rev-parse · push) · 라 11 번(init · symbolic-ref · ls-remote · fetch ·
+  // merge-base · update-ref · reset · add · commit · rev-parse · push). init 과 merge-base 는
+  // 서로 독립이라 «전용 디렉터리만 잃은» 회차에서 함께 나오고, 그때가 한 회차 최대(11 번)다.
+  // 이 값이 바뀌면(git 호출이 늘면) 아래 상한 칸의 계산이 달라지므로 «정확한 값» 으로 못 박는다.
+  assert.deepEqual(counts, [9, 10, 10, 11]);
+  assert.equal(Math.max(...counts), 11);
+});
+
+test("⒀ ⑷ 회차 최악 시간 상한 -- 최악 호출 수 × 호출 한도 < 생존 기록 신선도 기본 한도(두 상수에서 계산 · 손 숫자 0)", async () => {
+  const seal = await loadSeal();
+  const { DEFAULT_STALE_AFTER_SECONDS } = await import("./schedule-wire.mjs");
+  assert.equal(
+    typeof DEFAULT_STALE_AFTER_SECONDS,
+    "number",
+    "schedule-wire.mjs 가 DEFAULT_STALE_AFTER_SECONDS 를 export 하지 않는다",
+  );
+  const worstCalls = Math.max(...(await measureSealCallCounts(seal)));
+  const worstMs = worstCalls * seal.GIT_CALL_TIMEOUT_MS;
+  const staleMs = DEFAULT_STALE_AFTER_SECONDS * 1000;
+  assert.ok(
+    worstMs < staleMs,
+    `회차 최악 ${worstCalls} × ${seal.GIT_CALL_TIMEOUT_MS}ms = ${worstMs}ms 가 생존 기록 신선도 한도 ${staleMs}ms 이상이다`,
+  );
 });
