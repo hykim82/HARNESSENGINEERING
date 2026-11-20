@@ -440,10 +440,11 @@ function cleanGitEnv(env) {
 // git 호출 한 번의 시간 한도(HYK-255-s1-seal-order-1). 120 초 -> 30 초.
 //  이유: 봉인 단계는 이제 회차의 «맨 뒤» (sweep · wake 뒤)라 sweep · wake 는 더 늦어지지
 //  않지만, 회차 줄 · 생존 기록(last-run.json) · reach 알림은 여전히 봉인 «뒤» 에 있다. 봉인
-//  한 회차의 git 호출은 최대 11 번이고(init · symbolic-ref · ls-remote · fetch · merge-base ·
-//  update-ref · reset · add · commit · rev-parse · push · 시험이 실측) 호출마다 한도 직전까지
-//  걸리면 최악 11 × 120 = 1320 초(22 분)로 생존 기록 신선도 기본 한도(900 초)를 넘는다. 30
-//  초면 11 × 30 = 330 초(5.5 분) 이내다. 한 번이라도 한도에 닿으면 spawnSync 가 오류를 돌려줘
+//  한 회차의 git 호출은 최대 10 번이고(symbolic-ref · ls-remote · fetch · merge-base ·
+//  update-ref · reset · add · commit · rev-parse · push -- init 과 merge-base 는 같은 회차에
+//  함께 나오지 않는다 · 시험이 회차 모양별 호출 수 9 · 10 · 10 을 실측해 못 박는다) 호출마다
+//  한도 직전까지 걸리면 최악 10 × 120 = 1200 초(20 분)로 생존 기록 신선도 기본 한도(900 초)를
+//  넘는다. 30 초면 10 × 30 = 300 초(5 분) 이내다. 한 번이라도 한도에 닿으면 spawnSync 가 오류를 돌려줘
 //  단계가 «즉시» 실패로 끝나므로(FAILED · 다음 회차가 같은 내용으로 다시 시도) 실제 막힘은
 //  30 초 + 앞선 정상 호출 시간이다. 봉인 저장소는 줄 하나씩 쌓이는 작은 가지라 정상 ls-remote ·
 //  fetch · push 는 수 초 안이다(이 기계에서 실제 원격으로 잰 값은 없다 -- 못 쟀다).

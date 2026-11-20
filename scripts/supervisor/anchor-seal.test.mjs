@@ -1817,7 +1817,7 @@ test("⒀ ⑷ 망 호출 한도 = 30 초가 실제 spawn 옵션 timeout 으로 �
   assert.equal(res.status, 0);
 });
 
-test("⒀ ⑷ 회차 최악 시간 상한 -- 봉인 한 회차의 git 호출은 최대 11 번 · 11 × 한도 < 900 초(생존 기록 신선도 기본 한도)", async () => {
+test("⒀ ⑷ 회차 최악 시간 상한 -- 봉인 한 회차의 git 호출은 최대 10 번 · 10 × 한도 < 900 초(생존 기록 신선도 기본 한도)", async () => {
   const seal = await loadSeal();
   await withWorldAsync(async (w) => {
     const counts = [];
@@ -1846,12 +1846,18 @@ test("⒀ ⑷ 회차 최악 시간 상한 -- 봉인 한 회차의 git 호출은 
     const c = counting();
     cycle(w, T0 + 2 * MIN, { gitFn: c.fn });
     counts.push(c.n());
-    const max = Math.max(...counts);
-    assert.ok(max >= 9, `호출 수 표본이 너무 작다(측정 헛시험): ${counts}`);
-    assert.ok(max <= 11, `git 호출이 11 번을 넘었다: ${counts}`);
+    // 가 9 번(init · symbolic-ref · ls-remote · rev-parse · read-tree · add · commit · rev-parse ·
+    // push) · 나 10 번(symbolic-ref · ls-remote · fetch · merge-base · update-ref · reset · add ·
+    // commit · rev-parse · push) · 다 10 번(init · symbolic-ref · ls-remote · fetch · update-ref ·
+    // reset · add · commit · rev-parse · push). init 과 merge-base 는 같은 회차에 함께 나오지
+    // 않으므로 한 회차 최대는 10 번이다. 이 값이 바뀌면(git 호출이 늘면) 아래 최악 시간 계산을
+    // 다시 해야 한다 -- 그래서 «정확한 값» 으로 못 박는다.
+    assert.deepEqual(counts, [9, 10, 10]);
+    const worstCalls = Math.max(...counts);
+    assert.equal(worstCalls, 10);
     assert.ok(
-      max * seal.GIT_CALL_TIMEOUT_MS < 900_000,
-      `최악 ${max} × ${seal.GIT_CALL_TIMEOUT_MS}ms 가 900 초 이상이다`,
+      worstCalls * seal.GIT_CALL_TIMEOUT_MS < 900_000,
+      `최악 ${worstCalls} × ${seal.GIT_CALL_TIMEOUT_MS}ms 가 900 초 이상이다`,
     );
   });
 });
