@@ -6797,10 +6797,6 @@ function runWatchOnceCore(params) {
     ...params,
     detectorResult,
   });
-  // HYK-255-s1-anchor-seal-1: 봉인 단계도 «로그 줄 조립 전» 이다(결과가 watch.log 한
-  // 줄의 `anchor-seal:` 구간이 된다). 입력(anchorSeal · repoRoot · watchDir · now · fs
-  // seam)은 전부 params 안에 있다. opt-in 아니면 {notRun:true} -- git 호출 0.
-  const anchorSealResult = runAnchorSealStep(params);
   const {
     sweepResult,
     wakeResult,
@@ -6815,6 +6811,15 @@ function runWatchOnceCore(params) {
     // params 안에 있으므로(...params가 포함) 그대로 흘러간다.
     detectorResult,
   });
+  // HYK-255-s1-seal-order-1 (판정 #20261120-1424 3 · 선행 조건 #20261119-2121): 봉인 단계는
+  // 회차의 «맨 뒤» -- sweep · wake · 정지 종결 검사 · 자원 잔여(runOptionalAxisSteps) 가 «다
+  // 끝난 뒤» 돈다. 봉인은 원격 git 호출(ls-remote · fetch · push)을 하므로 느리거나 막히면
+  // 오래 걸리는데, 예전에는 이 호출이 sweep · wake 앞에 있어 그 지연이 sweep · wake 를
+  // 통째로 늦췄다. 봉인은 이들의 결과를 입력으로 쓰지 않는다(입력 = anchorSeal · repoRoot ·
+  // watchDir · now · fs seam · 모두 params 안에 있다 -- 순서를 바꿔도 값은 같다). 결과는 여전히
+  // «로그 줄 조립 전» 이다(watch.log 한 줄 맨 끝의 `anchor-seal:` 구간 · 줄 조립 순서와
+  // 구간의 자리는 무변). opt-in 아니면 {notRun:true} -- git 호출 0 · 줄 바이트 무변.
+  const anchorSealResult = runAnchorSealStep(params);
   return finalizeWatchOnceCycle({
     repoRoot,
     watchDir,
