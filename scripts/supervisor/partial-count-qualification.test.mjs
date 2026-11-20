@@ -448,7 +448,12 @@ test("설정 파일 실물 = 스키마대로 15행 · id k01~k15 · handling 은
       .map((k) => k.id),
     ["k08"],
   );
-  for (const file of ["partial-count-core.mjs", "partial-count-report.mjs"]) {
+  for (const file of [
+    "partial-count-core.mjs",
+    "partial-count-report.mjs",
+    "partial-count-rescan-core.mjs",
+    "partial-count-rescan.mjs",
+  ]) {
     const src = fs
       .readFileSync(new URL(`./${file}`, import.meta.url), "utf8")
       .replace(/\/\/.*$/gm, "");

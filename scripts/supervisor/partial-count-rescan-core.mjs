@@ -14,7 +14,9 @@
 //
 // 판정 #20261120-1519(책임자):
 //   3. 기각된 리뷰(state DISMISSED)는 ㄴ 분자에 «넣는다». 설정 · 인자로 끄고 켜는 길 0(선택지를 남기면 좋아 보이는 쪽으로 쓰인다).
-//      표기는 따로 = «기각된 리뷰 n건(원래 상태 미상)». 같은 리뷰가 앞 실행에 변경 요청으로 보였다면 그 건은 «변경 요청» 에만 센다(1건 1번).
+//      표기는 따로 = «기각된 리뷰 n건(원래 상태를 응답에서 알 수 없음)» (판정 #20261120-2346 3 문면 그대로). 같은 리뷰가 앞 실행에 변경 요청으로 보였다면 그 건은 «변경 요청» 에만 센다(1건 1번).
+//   창 문(R2 · 판정 #20261120-2346 3 · R1 검토 P2 둘째): 모든 흡수(PR 쓸기 · 리뷰 · 댓글 · D1)는 «창이 닫힌 뒤» 에만 한다(닫히기 전이면 RangeError).
+//      닫히기 전 시각으로 «done» 이 찍힌 단위(리뷰 · D1 · 쓸기 · 목록 · D1 후보 수집)는 done 으로 치지 않아 닫힌 뒤 실행이 다시 부른다(사건 합집합은 그대로).
 //   - 완료가 아닌 실행은 «0건» 이 아니라 «미완» 으로 찍는다(종료 값 3 · 마지막 줄 «전수 재조회: 미완 — 남은 미조회 U(…)»).
 //
 // ⚠️정직 한계(그대로 RESCAN_HONESTY_LIMITS 로 내보낸다):
@@ -146,10 +148,33 @@ export function computeRescanWindow({ fromDay, days } = {}) {
 
 // 창 끝 전 실행은 거부 -- 창이 닫힌 뒤에 쓸어야 «창 전체» 다.
 export function judgeWindowClosed({ window, nowMs }) {
-  return Number.isFinite(nowMs) && nowMs >= window.endMs
+  return isRecord(window) &&
+    Number.isFinite(window.endMs) &&
+    Number.isFinite(nowMs) &&
+    nowMs >= window.endMs
     ? { ok: true }
     : { ok: false, reason: "창이 아직 닫히지 않음" };
 }
+
+// 모든 흡수 앞의 문 -- 닫히기 전이면(창 · 시각을 못 읽는 경우 포함) 아무것도 흡수하지 않고 던진다. CLI · runRescanOnce 가 먼저 거부하므로 이 문은 두 번째 벽이다.
+function assertWindowClosed({ window, nowMs }) {
+  const gate = judgeWindowClosed({ window, nowMs });
+  if (!gate.ok) throw new RangeError(`흡수 거부: ${gate.reason}`);
+}
+
+// 상태의 fingerprint 에서 창을 다시 계산한다(창이 모양 오류면 null -- 그러면 «done» 을 하나도 믿지 않는다).
+function stateWindow(state) {
+  const fp = state.fingerprint;
+  const w = computeRescanWindow({ fromDay: fp?.fromDay, days: fp?.days });
+  return w.ok ? w : null;
+}
+
+// «done» 은 창이 닫힌 뒤 시각으로 찍혔을 때만 done 이다 -- 닫히기 전 시각(또는 시각 없음)의 done 은 닫힌 뒤 실행이 다시 부른다.
+const settledAfterClose = (isDone, doneAtMs, window) =>
+  isDone === true &&
+  window !== null &&
+  Number.isFinite(doneAtMs) &&
+  doneAtMs >= window.endMs;
 
 // ---------------------------------------------------------------------------
 // fingerprint -- 창 · 저장소 · 봇 목록 blob 이 다르면 거부한다(다른 재조회의 상태를 섞지 않는다).
@@ -222,13 +247,16 @@ export function createRescanState({ fingerprint }) {
         { done: false, doneAtMs: null, pages: 0, failure: null },
       ]),
     ),
-    d1: { collected: false, shas: {} },
+    d1: { collected: false, collectedAtMs: null, shas: {} },
     events: {},
     undecidable: {},
   };
 }
 
 const nullableString = (v) => v === null || typeof v === "string";
+// doneAtMs 는 없어도(옛 판 상태) · null 이어도 모양은 맞다 -- 없거나 null 인 done 은 «닫힌 뒤 done» 이 아니라 다시 부른다(settledAfterClose).
+const optionalTimeOk = (v) =>
+  v === undefined || v === null || Number.isFinite(v);
 
 function runsErrors(runs) {
   if (!Array.isArray(runs)) return ["runs 가 배열이 아님"];
@@ -267,6 +295,7 @@ function reviewsErrors(reviews) {
       !isRecord(v) ||
       !UNIT_STATES.includes(v.state) ||
       !nullableString(v.reason) ||
+      !optionalTimeOk(v.doneAtMs) ||
       !isCount(v.pages) ||
       !isCount(v.undecidable),
   );
@@ -292,8 +321,12 @@ function listsErrors(lists) {
 }
 
 function d1Errors(d1) {
-  if (!isRecord(d1) || typeof d1.collected !== "boolean") {
-    return ["d1 모양 오류(collected)"];
+  if (
+    !isRecord(d1) ||
+    typeof d1.collected !== "boolean" ||
+    !optionalTimeOk(d1.collectedAtMs)
+  ) {
+    return ["d1 모양 오류(collected · collectedAtMs)"];
   }
   if (!isRecord(d1.shas)) return ["d1.shas 가 객체가 아님"];
   const bad = Object.entries(d1.shas).some(
@@ -301,7 +334,8 @@ function d1Errors(d1) {
       !SHA_RE.test(sha) ||
       !isRecord(v) ||
       !UNIT_STATES.includes(v.state) ||
-      !nullableString(v.reason),
+      !nullableString(v.reason) ||
+      !optionalTimeOk(v.doneAtMs),
   );
   return bad ? ["d1.shas 항목 모양 오류"] : [];
 }
@@ -408,12 +442,22 @@ export function markUnitFailed({ state, unit, key, reason }) {
     next.prSweep.failure = why;
   } else if (unit === "reviews" && isPrNumber(key)) {
     const prev = next.reviews[String(key)] ?? emptyReviewUnit();
-    next.reviews[String(key)] = { ...prev, state: "failed", reason: why };
+    next.reviews[String(key)] = {
+      ...prev,
+      state: "failed",
+      reason: why,
+      doneAtMs: null,
+    };
   } else if (unit === "lists" && RESCAN_COMMENT_LIST_KEYS.includes(key)) {
     next.lists[key].failure = why;
   } else if (unit === "d1" && SHA_RE.test(String(key))) {
     const prev = next.d1.shas[key] ?? { state: "pending", reason: null };
-    next.d1.shas[key] = { ...prev, state: "failed", reason: why };
+    next.d1.shas[key] = {
+      ...prev,
+      state: "failed",
+      reason: why,
+      doneAtMs: null,
+    };
   } else {
     throw new RangeError(`알 수 없는 실패 단위: ${unit}`);
   }
@@ -423,6 +467,7 @@ export function markUnitFailed({ state, unit, key, reason }) {
 const emptyReviewUnit = () => ({
   state: "pending",
   reason: null,
+  doneAtMs: null,
   pages: 0,
   undecidable: 0,
 });
@@ -460,6 +505,7 @@ export function absorbPrSweep({
   nowMs,
   botLogins,
 }) {
+  assertWindowClosed({ window, nowMs });
   if (!pagesAreArrays(pages)) {
     return markUnitFailed({
       state,
@@ -504,7 +550,10 @@ export function absorbPrSweep({
       pages[pages.length - 1],
       window.startMs,
     );
-  if (covered && nowMs >= window.endMs && !next.prSweep.done) {
+  if (
+    covered &&
+    !settledAfterClose(next.prSweep.done, next.prSweep.doneAtMs, window)
+  ) {
     next.prSweep.done = true;
     next.prSweep.doneAtMs = nowMs;
   }
@@ -551,8 +600,10 @@ export function absorbReviewPages({
   pages,
   complete,
   window,
+  nowMs,
   botLogins,
 }) {
+  assertWindowClosed({ window, nowMs });
   if (!isPrNumber(prNumber) || !pagesAreArrays(pages)) {
     return markUnitFailed({
       state,
@@ -585,6 +636,7 @@ export function absorbReviewPages({
   next.reviews[String(prNumber)] = {
     state: complete === true ? "done" : "pending",
     reason: complete === true ? null : "응답 쪽 남음",
+    doneAtMs: complete === true ? nowMs : null,
     pages: raise(prev.pages, pages.length),
     undecidable: raise(prev.undecidable, unreadableReviewCount(pages)),
   };
@@ -600,6 +652,7 @@ export function absorbCommentPages({
   nowMs,
   botLogins,
 }) {
+  assertWindowClosed({ window, nowMs });
   if (!RESCAN_COMMENT_LIST_KEYS.includes(listKey)) {
     throw new RangeError(`알 수 없는 목록: ${listKey}`);
   }
@@ -633,7 +686,7 @@ export function absorbCommentPages({
   const covered =
     pages.length > 0 &&
     githubListCoversWindow(listKey, pages[pages.length - 1], window.startMs);
-  if (covered && nowMs >= window.endMs && !unit.done) {
+  if (covered && !settledAfterClose(unit.done, unit.doneAtMs, window)) {
     unit.done = true;
     unit.doneAtMs = nowMs;
   }
@@ -641,19 +694,30 @@ export function absorbCommentPages({
 }
 
 // D1(Update branch) 후보 sha 등록 -- 후보 수집(git)을 끝냈다는 표지(collected) + 아직 모르는 후보는 pending. 후보 0 개도 «수집했다» 로 남는다.
-export function registerUpdateBranchCandidates({ state, shas }) {
+export function registerUpdateBranchCandidates({ state, shas, window, nowMs }) {
+  assertWindowClosed({ window, nowMs });
   const next = clone(state);
   next.d1.collected = true;
+  next.d1.collectedAtMs = nowMs;
   for (const sha of Array.isArray(shas) ? shas : []) {
     if (SHA_RE.test(String(sha)) && !Object.hasOwn(next.d1.shas, sha)) {
-      next.d1.shas[sha] = { state: "pending", reason: null };
+      next.d1.shas[sha] = { state: "pending", reason: null, doneAtMs: null };
     }
   }
   return next;
 }
 
 // sha 하나의 판정 결과(기존 D1 판정 함수가 낸 값) -> counted 면 사건 1건(core 의 D1 접두). 판정 단위는 done.
-export function recordUpdateBranchResult({ state, sha, counted, atMs }) {
+// atMs = 사건 시각(커밋 시각) · nowMs = 이 판정을 흡수한 시각(done 표지 · 창이 닫힌 뒤여야 한다).
+export function recordUpdateBranchResult({
+  state,
+  sha,
+  counted,
+  atMs,
+  window,
+  nowMs,
+}) {
+  assertWindowClosed({ window, nowMs });
   if (!SHA_RE.test(String(sha))) {
     return markUnitFailed({
       state,
@@ -663,7 +727,7 @@ export function recordUpdateBranchResult({ state, sha, counted, atMs }) {
     });
   }
   const next = clone(state);
-  next.d1.shas[sha] = { state: "done", reason: null };
+  next.d1.shas[sha] = { state: "done", reason: null, doneAtMs: nowMs };
   if (counted === true) {
     next.events = mergeRescanEvents(next.events, [
       {
@@ -715,7 +779,36 @@ export function planRunBudget({
 export const rescanPrNumbers = (state) =>
   sortedUnion(state.prSweep.listPrs, state.prSweep.gitPrs);
 
-const reviewState = (state, n) => state.reviews[String(n)]?.state ?? "pending";
+// 단위 상태 읽기 -- done 은 «창이 닫힌 뒤 시각으로 찍힌 done» 만 done 이다(아니면 pending = 닫힌 뒤 실행이 다시 부른다).
+const readUnitState = (unit, window) =>
+  unit.state === "done" && !settledAfterClose(true, unit.doneAtMs, window)
+    ? "pending"
+    : unit.state;
+const reviewState = (state, n) => {
+  const unit = state.reviews[String(n)];
+  return unit ? readUnitState(unit, stateWindow(state)) : "pending";
+};
+const listUnitState = (state, key) => {
+  const l = state.lists[key];
+  if (l.failure !== null) return "failed";
+  return settledAfterClose(l.done, l.doneAtMs, stateWindow(state))
+    ? "done"
+    : "pending";
+};
+const sweepSettled = (state) =>
+  settledAfterClose(
+    state.prSweep.done,
+    state.prSweep.doneAtMs,
+    stateWindow(state),
+  );
+const d1Settled = (state) =>
+  settledAfterClose(
+    state.d1.collected,
+    state.d1.collectedAtMs,
+    stateWindow(state),
+  );
+const d1ShaStates = (state) =>
+  Object.values(state.d1.shas).map((s) => readUnitState(s, stateWindow(state)));
 
 // 단위 상태 -> {pending(아직 안 부름 · 일부만 부름), failed}. 실패는 따로 센다(두 번 세지 않는다).
 function unitCounts(states) {
@@ -728,19 +821,15 @@ function unitCounts(states) {
 // 남은 미조회 U = PR 쓸기(끝 전 1) + PR 리뷰 u1 + 목록 u2 + D1 u3 + 수집 실패 f. PR 쓸기가 끝나기 전에는 «남은 수 미상» 이라 U ≥ 1 이다 -- 0 이라 말하지 않는다.
 export function judgeRescanRemaining(state) {
   const sweepFailed = state.prSweep.failure !== null;
-  const sweep = !state.prSweep.done && !sweepFailed ? 1 : 0;
+  const sweep = !sweepSettled(state) && !sweepFailed ? 1 : 0;
   const reviews = unitCounts(
     rescanPrNumbers(state).map((n) => reviewState(state, n)),
   );
   const lists = unitCounts(
-    RESCAN_COMMENT_LIST_KEYS.map((k) => {
-      const l = state.lists[k];
-      return l.failure !== null ? "failed" : l.done ? "done" : "pending";
-    }),
+    RESCAN_COMMENT_LIST_KEYS.map((k) => listUnitState(state, k)),
   );
-  const shaStates = Object.values(state.d1.shas).map((s) => s.state);
-  const d1 = unitCounts(shaStates);
-  const d1Uncollected = state.d1.collected ? 0 : 1;
+  const d1 = unitCounts(d1ShaStates(state));
+  const d1Uncollected = d1Settled(state) ? 0 : 1;
   const strayFailedReviews = Object.entries(state.reviews).filter(
     ([k, v]) =>
       v.state === "failed" && !rescanPrNumbers(state).includes(Number(k)),
@@ -765,18 +854,18 @@ export function judgeRescanRemaining(state) {
 // 다음 실행이 불러야 할 단위 -- 실패 단위도 포함(실패 단위는 다음 실행 대상).
 export function planRescanTargets(state) {
   const failedOrPending = (s) => s !== "done";
+  const win = stateWindow(state);
   return {
-    sweep: !state.prSweep.done || state.prSweep.failure !== null,
+    sweep: !sweepSettled(state) || state.prSweep.failure !== null,
     reviews: rescanPrNumbers(state).filter((n) =>
       failedOrPending(reviewState(state, n)),
     ),
-    lists: RESCAN_COMMENT_LIST_KEYS.filter((k) => {
-      const l = state.lists[k];
-      return !l.done || l.failure !== null;
-    }),
-    d1Collect: !state.d1.collected,
+    lists: RESCAN_COMMENT_LIST_KEYS.filter((k) =>
+      failedOrPending(listUnitState(state, k)),
+    ),
+    d1Collect: !d1Settled(state),
     d1: Object.entries(state.d1.shas)
-      .filter(([, v]) => failedOrPending(v.state))
+      .filter(([, v]) => failedOrPending(readUnitState(v, win)))
       .map(([sha]) => sha),
   };
 }
@@ -858,7 +947,7 @@ export function renderRescanReport({ state, window, nowMs }) {
   const callTotal = sum(state.runs.map((r) => r.calls));
   const lines = [
     `전수 재조회 창: ${window.startLabel} ~ ${window.endLabel} (캐시 끔 · 실행 ${state.runs.length}회 · 호출 ${callTotal})`,
-    `ㄴ GitHub 사람 손(창 전체): 변경 요청 ${counts.changeRequest} · 미병합 닫기 ${counts.unmergedClose} · 대화 댓글 ${counts.comment} · 리뷰 줄 댓글 ${counts.reviewComment} · Update branch ${counts.updateBranch} · 기각된 리뷰 ${counts.dismissedReview}(원래 상태 미상) · 판정 불가 ${undecidable}`,
+    `ㄴ GitHub 사람 손(창 전체): 변경 요청 ${counts.changeRequest} · 미병합 닫기 ${counts.unmergedClose} · 대화 댓글 ${counts.comment} · 리뷰 줄 댓글 ${counts.reviewComment} · Update branch ${counts.updateBranch} · 기각된 리뷰 ${counts.dismissedReview}건(원래 상태를 응답에서 알 수 없음) · 판정 불가 ${undecidable}`,
     `조회 범위: PR ${scope.prs}개(목록 ${scope.fromList} ∪ git 병합 ${scope.fromGit}) · 리뷰 응답 쪽 ${scope.reviewPages} · 목록 쪽 ${scope.listPages} · D1 후보 ${scope.d1}`,
     declaration.ready
       ? "선언 재료: 가능"

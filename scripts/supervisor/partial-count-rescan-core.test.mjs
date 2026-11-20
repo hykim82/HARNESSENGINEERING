@@ -146,6 +146,7 @@ const reviews = (state, prNumber, pages, complete = true) =>
     pages: [pages],
     complete,
     window: W,
+    nowMs: NOW,
     botLogins: BOTS,
   });
 const comments = (state, listKey, pages, nowMs = NOW) =>
@@ -167,18 +168,27 @@ function completeState() {
   s = reviews(s, 15, REVIEWS_15);
   s = comments(s, "issueComments", [ISSUE_COMMENTS]);
   s = comments(s, "reviewComments", REVIEW_COMMENT_PAGES);
-  s = registerUpdateBranchCandidates({ state: s, shas: [SHA_A, SHA_B] });
+  s = registerUpdateBranchCandidates({
+    state: s,
+    shas: [SHA_A, SHA_B],
+    window: W,
+    nowMs: NOW,
+  });
   s = recordUpdateBranchResult({
     state: s,
     sha: SHA_A,
     counted: true,
     atMs: kst("2026-11-19 12:00"),
+    window: W,
+    nowMs: NOW,
   });
   s = recordUpdateBranchResult({
     state: s,
     sha: SHA_B,
     counted: false,
     atMs: kst("2026-11-19 13:00"),
+    window: W,
+    nowMs: NOW,
   });
   return s;
 }
@@ -454,10 +464,10 @@ test("⑷ 전부 끝나면 남은 미조회 0 · 완료", () => {
 });
 
 test("⑷ PR 쓸기 전에는 다른 건 전부 끝나 있어도 0 이라 말하지 않는다", () => {
-  // 쓸기만 «창이 닫히기 전» 시각으로 먹이면 끝나지 않는다(닫힌 뒤의 쓸기 1회가 꼭 필요)
-  const early = sweep(fresh(), { nowMs: W.endMs - 1 });
-  assert.equal(early.prSweep.done, false);
-  let s = early;
+  // 쓸기를 «창이 닫히기 전» 시각으로 먹이면 흡수 자체를 거부한다(R2 창 문) -- 닫힌 뒤의 쓸기 1회가 꼭 필요
+  assert.throws(() => sweep(fresh(), { nowMs: W.endMs - 1 }), RangeError);
+  let s = fresh();
+  assert.equal(s.prSweep.done, false);
   for (const [n, pages] of [
     [11, REVIEWS_11],
     [12, []],
@@ -468,7 +478,12 @@ test("⑷ PR 쓸기 전에는 다른 건 전부 끝나 있어도 0 이라 말하
   }
   s = comments(s, "issueComments", [ISSUE_COMMENTS]);
   s = comments(s, "reviewComments", REVIEW_COMMENT_PAGES);
-  s = registerUpdateBranchCandidates({ state: s, shas: [] });
+  s = registerUpdateBranchCandidates({
+    state: s,
+    shas: [],
+    window: W,
+    nowMs: NOW,
+  });
   const remaining = judgeRescanRemaining(s);
   assert.equal(remaining.complete, false);
   assert.equal(remaining.unqueried.sweep, 1);
@@ -514,7 +529,12 @@ test("⑷ 조건 하나씩 빼면 미완 -- 리뷰 · 목록 둘 · D1 · 후보
     }
     s = comments(s, "issueComments", [ISSUE_COMMENTS]);
     s = comments(s, "reviewComments", REVIEW_COMMENT_PAGES);
-    return registerUpdateBranchCandidates({ state: s, shas: [SHA_A] });
+    return registerUpdateBranchCandidates({
+      state: s,
+      shas: [SHA_A],
+      window: W,
+      nowMs: NOW,
+    });
   };
   const finish = (s) =>
     recordUpdateBranchResult({
@@ -522,6 +542,8 @@ test("⑷ 조건 하나씩 빼면 미완 -- 리뷰 · 목록 둘 · D1 · 후보
       sha: SHA_A,
       counted: false,
       atMs: NOW,
+      window: W,
+      nowMs: NOW,
     });
   assert.equal(judgeRescanRemaining(finish(base())).complete, true);
   // D1 후보 결과를 못 받음
@@ -561,7 +583,12 @@ test("⑷ 조건 하나씩 빼면 미완 -- 리뷰 · 목록 둘 · D1 · 후보
   }
   noList = comments(noList, "issueComments", [ISSUE_COMMENTS]);
   noList = finish(
-    registerUpdateBranchCandidates({ state: noList, shas: [SHA_A] }),
+    registerUpdateBranchCandidates({
+      state: noList,
+      shas: [SHA_A],
+      window: W,
+      nowMs: NOW,
+    }),
   );
   const lists = judgeRescanRemaining(noList);
   assert.equal(lists.unqueried.lists, 1);
@@ -616,6 +643,7 @@ test("⑸ 응답 모양 위반(배열 아님)은 그 단위만 실패 -- 쓸기 
     pages: [{ not: "array" }],
     complete: true,
     window: W,
+    nowMs: NOW,
     botLogins: BOTS,
   });
   assert.equal(badReview.reviews["11"].state, "failed");
@@ -676,6 +704,7 @@ test("⑺ 기각된 리뷰는 ㄴ 분자에 들어가고 끄는 길이 없다 --
     pages: [REVIEWS_15],
     complete: true,
     window: W,
+    nowMs: NOW,
     botLogins: BOTS,
     includeDismissed: false,
     countDismissed: false,
@@ -713,13 +742,15 @@ test("⑺ 같은 리뷰가 앞 실행엔 변경 요청 · 뒤 실행엔 기각�
   assert.equal(countRescanEvents(s).dismissedReview, 1);
 });
 
-test("⑺ 렌더 -- 기각된 리뷰는 따로 «기각된 리뷰 n(원래 상태 미상)» 으로 보이고 분자 합(numerator)에는 들어 있다", () => {
+test("⑺ 렌더 -- 기각된 리뷰는 따로 «기각된 리뷰 n건(원래 상태를 응답에서 알 수 없음)» 으로 보이고 분자 합(numerator)에는 들어 있다", () => {
   const out = renderRescanReport({
     state: completeState(),
     window: W,
     nowMs: NOW,
   });
-  assert.ok(out.lines[1].includes("기각된 리뷰 1(원래 상태 미상)"));
+  assert.ok(
+    out.lines[1].includes("기각된 리뷰 1건(원래 상태를 응답에서 알 수 없음)"),
+  );
   assert.equal(out.counts.numerator, 9);
 });
 
@@ -735,7 +766,7 @@ test("⑹ 줄 형식 고정 -- 완료 표본(손으로 센 값)", () => {
   const out = renderRescanReport({ state, window: W, nowMs: NOW });
   const expected = [
     "전수 재조회 창: 2026-11-14 00:00 KST ~ 2026-11-21 00:00 KST (캐시 끔 · 실행 2회 · 호출 17)",
-    "ㄴ GitHub 사람 손(창 전체): 변경 요청 3 · 미병합 닫기 1 · 대화 댓글 1 · 리뷰 줄 댓글 2 · Update branch 1 · 기각된 리뷰 1(원래 상태 미상) · 판정 불가 0",
+    "ㄴ GitHub 사람 손(창 전체): 변경 요청 3 · 미병합 닫기 1 · 대화 댓글 1 · 리뷰 줄 댓글 2 · Update branch 1 · 기각된 리뷰 1건(원래 상태를 응답에서 알 수 없음) · 판정 불가 0",
     "조회 범위: PR 4개(목록 3 ∪ git 병합 2) · 리뷰 응답 쪽 4 · 목록 쪽 4 · D1 후보 2",
     "선언 재료: 가능",
     "전수 재조회: 완료 — 남은 미조회 0",
@@ -759,12 +790,19 @@ function incompleteState() {
   });
   s = comments(s, "issueComments", [ISSUE_COMMENTS]);
   s = comments(s, "reviewComments", REVIEW_COMMENT_PAGES);
-  s = registerUpdateBranchCandidates({ state: s, shas: [SHA_A, SHA_B] });
+  s = registerUpdateBranchCandidates({
+    state: s,
+    shas: [SHA_A, SHA_B],
+    window: W,
+    nowMs: NOW,
+  });
   s = recordUpdateBranchResult({
     state: s,
     sha: SHA_A,
     counted: true,
     atMs: kst("2026-11-19 12:00"),
+    window: W,
+    nowMs: NOW,
   });
   return runs(s, [
     [kst("2026-11-21 06:00"), 10, "budget"],
@@ -780,7 +818,7 @@ test("⑹ 줄 형식 고정 -- 미완 표본(남은 미조회 · 다음 실행 �
   });
   const expected = [
     "전수 재조회 창: 2026-11-14 00:00 KST ~ 2026-11-21 00:00 KST (캐시 끔 · 실행 2회 · 호출 20)",
-    "ㄴ GitHub 사람 손(창 전체): 변경 요청 1 · 미병합 닫기 1 · 대화 댓글 1 · 리뷰 줄 댓글 2 · Update branch 1 · 기각된 리뷰 0(원래 상태 미상) · 판정 불가 0",
+    "ㄴ GitHub 사람 손(창 전체): 변경 요청 1 · 미병합 닫기 1 · 대화 댓글 1 · 리뷰 줄 댓글 2 · Update branch 1 · 기각된 리뷰 0건(원래 상태를 응답에서 알 수 없음) · 판정 불가 0",
     "조회 범위: PR 4개(목록 3 ∪ git 병합 2) · 리뷰 응답 쪽 2 · 목록 쪽 4 · D1 후보 2",
     "선언 재료: 불가 — 미완(남은 미조회 3)",
     "전수 재조회: 미완 — 남은 미조회 3(PR 쓸기 0 · PR 리뷰 1 · 목록 0 · D1 1 · 수집 실패 1) — 다음 실행 가능 ≥ 10:30 KST",
@@ -893,7 +931,12 @@ test("⑻ 완료가 아닌 실행은 종료 값 3 -- 리뷰 미조회가 남음 
   let s = sweep(fresh(), { pages: [[SWEEP_PAGE[3]]], git: [20] });
   s = comments(s, "issueComments", [[]]);
   s = comments(s, "reviewComments", [[]]);
-  s = registerUpdateBranchCandidates({ state: s, shas: [] });
+  s = registerUpdateBranchCandidates({
+    state: s,
+    shas: [],
+    window: W,
+    nowMs: NOW,
+  });
   const out = renderRescanReport({ state: s, window: W, nowMs: NOW });
   assert.equal(out.counts.numerator, 0);
   assert.equal(out.exit, 3);
@@ -927,7 +970,113 @@ test("⑻ 종료 값 -- 완료 0 · 미완 3 · 거부/고장 1(상태 깨짐 ·
 
 // ---- 정직 한계 · 순수성 ---------------------------------------------------------------------------------------------
 
-test("정직 한계 문면 -- 승인 리뷰 자동 기각 과대 계수 · 상태 파일 독립 앵커 아님 · 실제 응답 미측이 내보내진다", () => {
+// ---- ⑼ 창 문(R2 · 검토 P2 둘째 · 판정 2346 3) -------------------------------------------------------------------------
+
+test("⑼ 창 문 -- 모든 흡수(쓸기 · 리뷰 · 댓글 · D1 후보 · D1 판정)는 창이 닫히기 전이면 거부하고 닫힌 첫 순간부터 받는다", () => {
+  const before = W.endMs - 1;
+  const base = completeState();
+  const calls = {
+    sweep: (nowMs) => sweep(base, { nowMs }),
+    reviews: (nowMs) =>
+      absorbReviewPages({
+        state: base,
+        prNumber: 11,
+        pages: [REVIEWS_11],
+        complete: true,
+        window: W,
+        nowMs,
+        botLogins: BOTS,
+      }),
+    comments: (nowMs) =>
+      comments(base, "issueComments", [ISSUE_COMMENTS], nowMs),
+    d1Register: (nowMs) =>
+      registerUpdateBranchCandidates({
+        state: base,
+        shas: [SHA_A],
+        window: W,
+        nowMs,
+      }),
+    d1Result: (nowMs) =>
+      recordUpdateBranchResult({
+        state: base,
+        sha: SHA_A,
+        counted: true,
+        atMs: kst("2026-11-19 12:00"),
+        window: W,
+        nowMs,
+      }),
+  };
+  const snapshot = JSON.stringify(base);
+  for (const [name, call] of Object.entries(calls)) {
+    assert.throws(() => call(before), RangeError, `${name} 창 닫히기 1ms 전`);
+    assert.throws(() => call(NaN), RangeError, `${name} 시각 NaN`);
+    assert.doesNotThrow(() => call(W.endMs), `${name} 닫힌 첫 순간`);
+  }
+  assert.equal(JSON.stringify(base), snapshot, "거부해도 입력 상태 무변");
+  // 창 객체가 없거나 모양이 틀려도 거부(문이 열린 채로 흡수하지 않는다)
+  assert.throws(
+    () =>
+      registerUpdateBranchCandidates({
+        state: base,
+        shas: [],
+        window: undefined,
+        nowMs: NOW,
+      }),
+    RangeError,
+  );
+});
+
+test("⑼ 닫히기 전 시각으로 done 이 찍힌 리뷰 · D1 은 done 이 아니다 -- 닫힌 뒤 다시 부르고 사건 합집합은 그대로", () => {
+  const settled = completeState();
+  assert.equal(judgeRescanRemaining(settled).complete, true);
+  const stale = JSON.parse(JSON.stringify(settled));
+  stale.reviews["11"].doneAtMs = W.endMs - 1; // 닫히기 전 시각의 done
+  delete stale.reviews["13"].doneAtMs; // 시각 없는 옛 판 done
+  stale.d1.shas[SHA_A].doneAtMs = W.endMs - 1;
+  stale.d1.collectedAtMs = W.endMs - 1;
+  const remaining = judgeRescanRemaining(stale);
+  assert.equal(remaining.complete, false);
+  assert.equal(remaining.unqueried.prReviews, 2, "리뷰 11 · 13");
+  assert.equal(remaining.unqueried.d1, 2, "D1 sha 하나 + 후보 수집 표지");
+  const targets = planRescanTargets(stale);
+  assert.deepEqual(targets.reviews, [11, 13]);
+  assert.deepEqual(targets.d1, [SHA_A]);
+  assert.equal(targets.d1Collect, true);
+  assert.equal(
+    countRescanEvents(stale).numerator,
+    countRescanEvents(settled).numerator,
+    "사건은 그대로(합집합 유지)",
+  );
+  // 닫힌 뒤 다시 부르면 풀리고 같은 사건은 중복되지 않는다
+  let again = stale;
+  again = reviews(again, 11, REVIEWS_11);
+  again = reviews(again, 13, REVIEWS_13);
+  again = registerUpdateBranchCandidates({
+    state: again,
+    shas: [SHA_A],
+    window: W,
+    nowMs: NOW + HOUR,
+  });
+  again = recordUpdateBranchResult({
+    state: again,
+    sha: SHA_A,
+    counted: true,
+    atMs: kst("2026-11-19 12:00"),
+    window: W,
+    nowMs: NOW + HOUR,
+  });
+  assert.equal(judgeRescanRemaining(again).complete, true);
+  assert.equal(
+    countRescanEvents(again).numerator,
+    countRescanEvents(settled).numerator,
+  );
+  // 시각 칸 모양이 틀린 상태는 검증이 거부한다
+  const broken = JSON.parse(JSON.stringify(settled));
+  broken.reviews["11"].doneAtMs = "어제";
+  assert.equal(validateRescanState(broken).ok, false);
+});
+
+test("정직 한계 문면 --승인 리뷰 자동 기각 과대 계수 · 상태 파일 독립 앵커 아님 · 실제 응답 미측이 내보내진다", () => {
   const joined = rescan.RESCAN_HONESTY_LIMITS.join("\n");
   assert.ok(joined.includes("독립 앵커가 아니다"));
   assert.ok(joined.includes("지워진 댓글"));

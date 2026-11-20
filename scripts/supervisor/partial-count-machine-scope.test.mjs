@@ -748,7 +748,12 @@ test("실물 설정 파일 = 스키마(v2)대로 · 문턱 · 컷 · 기준 변�
     fs
       .readFileSync(new URL(`./${file}`, import.meta.url), "utf8")
       .replace(/\/\/.*$/gm, "");
-  for (const file of ["partial-count-core.mjs", "partial-count-report.mjs"]) {
+  for (const file of [
+    "partial-count-core.mjs",
+    "partial-count-report.mjs",
+    "partial-count-rescan-core.mjs",
+    "partial-count-rescan.mjs",
+  ]) {
     const src = stripped(file);
     assert.equal(
       /(observationDays|minDeliveredPerDay|minConcurrentTracks)\s*[:=]\s*\d/.test(
