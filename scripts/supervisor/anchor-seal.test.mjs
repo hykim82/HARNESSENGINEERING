@@ -16,8 +16,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import * as watchRun from "./watch-run.mjs";
 
 const ROOT = execFileSync("git", ["rev-parse", "--show-toplevel"], {
@@ -43,8 +44,10 @@ process.on("exit", () => {
 });
 
 const { runWatchOnce } = watchRun;
-// 로컬 날짜가 TZ 와 무관하게 2026-11-19 가 되도록 «로컬 생성자» 로 만든다.
-const T0 = new Date(2026, 10, 19, 10, 0, 0).getTime();
+// 기준 시각은 UTC 로 고정한다(2026-11-19T01:00:00.000Z) -- ⑴ 칸의 기준 줄(BASE_LINE_TEMPLATE)이
+// 이 순간을 글자 그대로 박았기 때문이다. 로컬 생성자(new Date(년, 월, …))로 만들면 TZ 에 따라
+// 순간이 달라져(KST 01:00Z · UTC 10:00Z) 기준 줄과 어긋난다(PR #389 CI 빨강 = 러너 UTC).
+const T0 = Date.UTC(2026, 10, 19, 1, 0, 0);
 const MIN = 60 * 1000;
 const DAY = 24 * 60 * MIN;
 const OK_DETECTOR = JSON.stringify({
@@ -246,6 +249,17 @@ function baseLine(w) {
   return BASE_LINE_TEMPLATE.replace("@@CAP@@", w.capPath);
 }
 
+// ⑴ 칸의 «줄 전체 비교» 는 이 저장소 체크아웃의 `.harness/aborts` 에 기대면 안 된다(5R 실측:
+// 4R 이 남긴 중단 기록 CODER-abort-r1.json 이 있으면 줄이 blocked_termination_status=FOUND 로
+// 달라져 시간대와 무관하게 빨강). 정지-종결 축의 조사 디렉터리를 빈 임시 디렉터리로 돌린다 --
+// 줄 비교 자체는 그대로다(그 축이 FOUND 로 줄에 실리는 동작은
+// watch-run-blocked-termination.test.mjs 의 opt-in 칸이 합성 기록으로 따로 지킨다).
+function emptyHarnessScan(w) {
+  const harnessDir = join(w.root, "empty-harness");
+  fs.mkdirSync(harnessDir, { recursive: true });
+  return { harnessDir };
+}
+
 test("⑴ 스위치 없음 -> watch.log 줄이 base 와 바이트 같다 · 단계 미실행 · 봉인 흔적 파일 0", () => {
   withWorld((w) => {
     const before = fs.existsSync(w.watchDir) ? fs.readdirSync(w.watchDir) : [];
@@ -255,6 +269,7 @@ test("⑴ 스위치 없음 -> watch.log 줄이 base 와 바이트 같다 · 단�
       now: T0,
       capPath: w.capPath,
       execFn: () => OK_DETECTOR,
+      blockedTerminationScan: emptyHarnessScan(w),
     });
     assert.equal(r.line, baseLine(w));
     assert.equal(lastLogLine(w), baseLine(w));
@@ -278,6 +293,7 @@ test("⑴ 스위치가 명시적으로 null 이어도 줄이 같다 · 단계 �
       capPath: w.capPath,
       execFn: () => OK_DETECTOR,
       anchorSeal: null,
+      blockedTerminationScan: emptyHarnessScan(w),
     });
     assert.equal(r.line, baseLine(w));
     assert.equal(typeof watchRun.runAnchorSealStep, "function");
@@ -295,6 +311,86 @@ test("⑴ 스위치가 명시적으로 null 이어도 줄이 같다 · 단계 �
     assert.equal(res.notRun, true);
     assert.equal(gitCalls, 0);
   });
+});
+
+// ⑴ 시간대 칸(5R · PR #389 CI 빨강 수리): 위 두 «스위치» 칸이 «어느 시간대에서도» 같은
+// 판정을 내는지 -- 시간대를 «자식 프로세스 env TZ» 로 준다(부모의 process.env.TZ 를 바꿔 같은
+// 프로세스에서 재면 Node 의 시간대 캐시 때문에 헛시험이 될 수 있다 · 그래서 자식). 자식이 실제로
+// 그 시간대로 떴다는 값도 단언한다(헛시험 방지). 음수 오프셋(America/Los_Angeles)은 UTC 기준
+// 순간의 «로컬 날짜가 전날로 넘어가는 쪽» 이라 칸으로 고정한다(자식 2칸 × 시간대 3 = 몇 초).
+// 이 칸 이름은 자식이 고르는 이름 패턴(`⑴ 스위치`)에 걸리지 않는다 -- 자식이 이 칸을 다시
+// 돌려 재귀하지 않는다.
+const SWITCH_OFF_CELL_PATTERN = "⑴ 스위치";
+const TZ_CASES = [
+  // [TZ, 로컬 생성자 2026-11-19 10:00 이 가리키는 순간(자식 확인값), T0 순간의 로컬 날짜]
+  ["UTC", "2026-11-19T10:00:00.000Z", "2026-11-19"],
+  ["Asia/Seoul", "2026-11-19T01:00:00.000Z", "2026-11-19"],
+  ["America/Los_Angeles", "2026-11-19T18:00:00.000Z", "2026-11-18"],
+];
+
+function runChildNode(args, tz) {
+  // 러너가 시험 파일 프로세스에 심는 NODE_TEST_CONTEXT 가 자식 `node --test` 에 상속되면 자식이
+  // TAP 대신 러너 내부 직렬화로 말해 stdout 이 비므로 뺀다.
+  const env = { ...process.env, TZ: tz };
+  delete env.NODE_TEST_CONTEXT;
+  return spawnSync(process.execPath, args, {
+    cwd: ROOT,
+    encoding: "utf8",
+    env,
+    timeout: 120000,
+  });
+}
+
+test("⑴ 시간대 UTC · Asia/Seoul · America/Los_Angeles: 스위치 없음 두 칸이 자식 프로세스(env TZ)에서도 초록 · T0 는 UTC 고정", () => {
+  for (const [tz, localCtorInstant, localDateAtT0] of TZ_CASES) {
+    // 1) 자식이 실제로 그 시간대로 떴다 -- 로컬 생성자 값이 시간대마다 달라진다.
+    const probe = runChildNode(
+      [
+        "-e",
+        `console.log(JSON.stringify({ctor:new Date(2026,10,19,10,0,0).toISOString(),` +
+          `local:(()=>{const d=new Date(${T0});const p=(n)=>String(n).padStart(2,"0");` +
+          `return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate());})()}))`,
+      ],
+      tz,
+    );
+    assert.equal(probe.status, 0, probe.stderr);
+    assert.deepEqual(JSON.parse(probe.stdout.trim()), {
+      ctor: localCtorInstant,
+      local: localDateAtT0,
+    });
+    // 2) 부모의 T0 는 시간대와 무관하게 기준 줄의 순간이다.
+    assert.equal(new Date(T0).toISOString(), "2026-11-19T01:00:00.000Z");
+    assert.ok(
+      BASE_LINE_TEMPLATE.startsWith(`${new Date(T0).toISOString()} `),
+      "기준 줄 머리의 시각이 T0 와 다르다",
+    );
+    // 3) 그 시간대의 자식에서 «스위치» 칸 둘이 초록 -- TAP 요약 줄만 판독한다.
+    const child = runChildNode(
+      [
+        "--test",
+        "--test-reporter=tap",
+        `--test-name-pattern=${SWITCH_OFF_CELL_PATTERN}`,
+        fileURLToPath(import.meta.url),
+      ],
+      tz,
+    );
+    const tap = child.stdout ?? "";
+    const okCells = tap.match(/^ok \d+ - ⑴ 스위치/gm) ?? [];
+    assert.equal(
+      okCells.length,
+      2,
+      `자식(${tz}) 초록 칸 수 · 상태 ${child.status}\n${tap.slice(0, 1500)}`,
+    );
+    assert.ok(
+      /^# fail 0$/m.test(tap),
+      `자식(${tz}) 실패 요약\n${tap.slice(0, 1500)}`,
+    );
+    assert.ok(
+      !/^not ok /m.test(tap),
+      `자식(${tz}) 빨간 칸\n${tap.slice(0, 1500)}`,
+    );
+    assert.equal(child.status, 0);
+  }
 });
 
 test("⑴ CLI 인자 -> opt-in 객체: --anchor-seal-remote 가 없으면 null", () => {
