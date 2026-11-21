@@ -715,7 +715,7 @@ test("ⓓ 인자 오류 · 필수 인자 없음 · 잘못된 창 = exit 1 · 쓰
 
 // ---- ⓔ 60분 합 예산 -------------------------------------------------------------------------------------------------------
 
-test("ⓔ 직전 60분 합이 10 이면 호출 0 -- 다음 실행 가능 시각만 찍고 상태는 그대로(실행 기록을 만들지 않는다)", () =>
+test("ⓔ 직전 60분 합이 10 이면 호출 0 -- 다음 실행 가능 시각만 찍고 실행 기록은 그대로(실행 기록을 만들지 않는다)", () =>
   withTmp(async (dir) => {
     const world = buildWorld();
     const fingerprint = buildRescanFingerprint({
@@ -803,6 +803,106 @@ test("ⓑ 닫히기 전 시각으로 done 이 찍힌 리뷰 · D1 이 상태에 
       readState(dir).reviews["13"].doneAtMs >= W.endMs,
       "다시 부른 단위는 닫힌 뒤 시각으로 done",
     );
+  }));
+
+// 검토 변이 M10(목록 «닫힌 뒤 끝났는가» 판정이 시각을 무시) · M11(쓸기 판정이 시각을 무시)이 이 칸에서 빨강이 된다.
+// 단위 하나만 «닫히기 전 시각으로 done» 으로 되돌리고(나머지는 닫힌 뒤 done 그대로) 닫힌 뒤 실행이 그 단위만 부르는지 본다.
+// 기대 주소는 위 ⓐ 응답표에서 손으로 적는다: 쓸기 = PR 목록 1쪽(4건 · 끝 항목 창 밖) · 대화 댓글 = 1 · 2쪽 · 리뷰 줄 댓글 = 1쪽.
+for (const stale of [
+  {
+    name: "PR 쓸기(prSweep.doneAtMs)",
+    rewind: (state) => {
+      state.prSweep.doneAtMs = W.endMs - 1;
+    },
+    urls: [U.prList(1)],
+  },
+  {
+    name: "대화 댓글 목록(lists.issueComments.doneAtMs)",
+    rewind: (state) => {
+      state.lists.issueComments.doneAtMs = W.endMs - 1;
+    },
+    urls: [U.issue(1), U.issue(2)],
+  },
+  {
+    name: "리뷰 줄 댓글 목록(lists.reviewComments.doneAtMs)",
+    rewind: (state) => {
+      state.lists.reviewComments.doneAtMs = W.endMs - 1;
+    },
+    urls: [U.reviewComments(1)],
+  },
+]) {
+  test(`ⓑ 닫히기 전 시각으로 done 이 찍힌 ${stale.name} 만 되돌리면 닫힌 뒤 실행이 그 단위만 다시 부른다 -- 사건 합집합은 그대로`, () =>
+    withTmp(async (dir) => {
+      const world = buildWorld();
+      await runOnce({ dir, world, nowMs: RUN1_NOW, maxCalls: 4 });
+      const complete = await runOnce({ dir, world, nowMs: RUN2_NOW });
+      assert.equal(complete.result.exit, 0);
+      const eventsBefore = JSON.stringify(readState(dir).events);
+      const rewound = readState(dir);
+      const doneBefore = {
+        sweep: rewound.prSweep.done,
+        issue: rewound.lists.issueComments.done,
+        review: rewound.lists.reviewComments.done,
+      };
+      assert.deepEqual(doneBefore, { sweep: true, issue: true, review: true });
+      stale.rewind(rewound); // done 표지는 true 그대로 · 시각만 창 닫힘 1ms 전
+      fs.writeFileSync(paths(dir).statePath, JSON.stringify(rewound), "utf8");
+      const { result, log } = await runOnce({ dir, world, nowMs: RUN3_NOW });
+      assert.deepEqual(
+        log.urls,
+        stale.urls,
+        "시각이 닫히기 전인 단위만 다시 부른다",
+      );
+      assert.deepEqual(log.unexpected, []);
+      assert.equal(result.exit, 0);
+      assert.equal(lastLine(result), "전수 재조회: 완료 — 남은 미조회 0");
+      assert.equal(
+        JSON.stringify(readState(dir).events),
+        eventsBefore,
+        "같은 사건은 중복되지 않는다",
+      );
+      const after = readState(dir);
+      assert.ok(
+        after.prSweep.doneAtMs >= W.endMs &&
+          after.lists.issueComments.doneAtMs >= W.endMs &&
+          after.lists.reviewComments.doneAtMs >= W.endMs,
+        "다시 부른 단위는 닫힌 뒤 시각으로 done",
+      );
+    }));
+}
+
+test("ⓑ 닫히기 전 시각으로 done 이 찍힌 쓸기 · 두 목록이 함께 있으면 쓸기만 부르고 멈춘 실행은 «완료» 를 말하지 않는다(목록 2 미조회) · 이어 치면 두 목록을 다시 받는다", () =>
+  withTmp(async (dir) => {
+    const world = buildWorld();
+    await runOnce({ dir, world, nowMs: RUN1_NOW, maxCalls: 4 });
+    await runOnce({ dir, world, nowMs: RUN2_NOW });
+    const rewound = readState(dir);
+    rewound.prSweep.doneAtMs = W.endMs - 1;
+    rewound.lists.issueComments.doneAtMs = W.endMs - 1;
+    rewound.lists.reviewComments.doneAtMs = W.endMs - 1;
+    fs.writeFileSync(paths(dir).statePath, JSON.stringify(rewound), "utf8");
+    // 호출 예산 1 로 쓸기만 부르고 멈추면 «완료» 를 말하지 않는다(쓸기 끝 전 = 남은 미조회 ≥ 1 · 목록 2 도 미조회)
+    const partial = await runOnce({
+      dir,
+      world,
+      nowMs: RUN3_NOW,
+      maxCalls: 1,
+    });
+    assert.deepEqual(partial.log.urls, [U.prList(1)]);
+    assert.equal(partial.result.exit, 3);
+    assert.equal(partial.result.complete, false);
+    assert.match(
+      lastLine(partial.result),
+      /^전수 재조회: 미완 — 남은 미조회 2\(PR 쓸기 0 · PR 리뷰 0 · 목록 2 · D1 0 · 수집 실패 0\)/,
+    );
+    // 이어서 치면 두 목록까지 다시 받고 완료
+    const rest = await runOnce({ dir, world, nowMs: RUN3_NOW + 2 * HOUR });
+    assert.deepEqual(rest.log.urls, [
+      U.issue(1),
+      U.issue(2),
+      U.reviewComments(1),
+    ]);
+    assert.equal(rest.result.exit, 0);
   }));
 
 // ---- ⓔ 쪽 넘김 ------------------------------------------------------------------------------------------------------------
@@ -997,6 +1097,34 @@ test("ⓔ 저장 도중 rename 이 죽으면(디스크 오류) 앞 단위까지�
       "리뷰 5쪽 + 목록 3쪽 + D1 1 = 디스크 상태에서 이어서",
     );
     assert.equal(retry.result.exit, 0);
+  }));
+
+// R2 검토 P2-3 -- 보고 파일 저장이 죽으면 exit 1 이지만 그 실행은 상태 파일을 이미 썼다. 이 칸은 «디스크 사실» 을 단언한다.
+// 결과 객체의 wrote.state 칸은 현재 false 로 나간다(디스크 사실과 다름) -- 그 값을 아래에 «알려진 공백» 으로 그대로 박아 둔다.
+// 제품 변경 필요(finishRun 이 상태 저장 횟수를 refused 결과에 실어야 한다) -- 이 조각은 시험 파일만이라 고치지 않는다. 다음 조각 후보.
+test("ⓔ 보고 파일 저장이 죽으면 exit 1 · 보고는 없고 · 그 실행의 상태는 이미 디스크에 있다 -- 결과 객체 wrote.state 는 알려진 공백(false)", () =>
+  withTmp(async (dir) => {
+    const world = buildWorld();
+    const { io } = spyIo({
+      renameSync: (from, to) => {
+        if (to === paths(dir).reportOut)
+          throw new Error("보고 디스크 오류(합성)");
+        fs.renameSync(from, to);
+      },
+    });
+    const { result } = await runOnce({ dir, world, nowMs: RUN1_NOW, io });
+    assert.equal(result.exit, 1);
+    assert.match(
+      result.lines[0],
+      /^전수 재조회: 거부 — 보고 파일 저장 실패\(보고 디스크 오류\(합성\)\)/,
+    );
+    assert.equal(fs.existsSync(paths(dir).reportOut), false, "보고는 없다");
+    const onDisk = readState(dir);
+    assert.equal(onDisk.prSweep.done, true, "상태는 이미 디스크에 있다");
+    assert.equal(onDisk.runs.length, 1, "이 실행의 기록이 디스크에 있다");
+    assert.equal(result.wrote.report, false);
+    // 알려진 공백(제품 변경 필요 · 다음 조각 후보): 디스크 사실은 «상태를 썼다» 인데 결과 객체는 false 다.
+    assert.equal(result.wrote.state, false);
   }));
 
 test("ⓔ writeTextAtomic -- 없는 폴더도 만들고 성공하면 null · 쓰기가 죽으면 사유 문자열(throw 0) · tmp 이름은 최종 이름과 다르다", () =>
