@@ -1135,7 +1135,12 @@ test("⑹ 코드에 봇 이름 리터럴 0 -- 설정 파일의 login 이 수집�
   );
   assert.equal(cfg.schema_version, "github-bot-accounts/v1");
   assert.ok(Array.isArray(cfg.bots) && cfg.bots.length >= 1);
-  for (const file of ["partial-count-report.mjs", "partial-count-core.mjs"]) {
+  for (const file of [
+    "partial-count-report.mjs",
+    "partial-count-core.mjs",
+    "partial-count-rescan-core.mjs",
+    "partial-count-rescan.mjs",
+  ]) {
     const src = fs.readFileSync(new URL(`./${file}`, import.meta.url), "utf8");
     for (const bot of cfg.bots) {
       assert.equal(src.includes(bot.login), false, `${file} 에 봇 이름 리터럴`);
