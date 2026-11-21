@@ -20,6 +20,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import * as watchRun from "./watch-run.mjs";
+import { ADMISSION_SCHEMA_VERSION } from "./admission-ledger-core.mjs";
 
 const ROOT = execFileSync("git", ["rev-parse", "--show-toplevel"], {
   encoding: "utf8",
@@ -168,6 +169,9 @@ function cycle(w, now = T0, sealExtra = {}, runExtra = {}) {
     now,
     capPath: w.capPath,
     execFn: () => OK_DETECTOR,
+    // 정지-종결 축의 조사 디렉터리를 빈 합성 폴더로 -- 실제 체크아웃의 `.harness/aborts` 를
+    // 읽지 않는다(ⓗ ⑵ · 그 날 상태에 따라 결과가 달라지면 시험 결함).
+    blockedTerminationScan: emptyHarnessScan(w),
     anchorSeal: sealOpts(w, sealExtra),
     ...runExtra,
   });
@@ -1559,4 +1563,330 @@ test("R2 ⑻ 봉인 뒤 변조가 드러나는 길 -- anchor-seal.mjs 머리에 
     assert.equal(after.g7, "mismatch");
     assert.equal(after.g2, "match");
   });
+});
+
+// ---------------------------------------------------------------------------
+// ⒀ 봉인 단계 순서 (HYK-255-s1-seal-order-1 · 판정 #20261120-1424 3 · 선행 조건 #20261119-2121)
+// ---------------------------------------------------------------------------
+// «봉인을 켜도 감시 회차의 sweep · wake 가 봉인의 망 호출 때문에 늦어지지 않는다».
+// 전부 프로덕션 회차(`runWatchOnce`)로 구동한다. 호출 순서는 seam 이 기록한다:
+//   sweep = sweepExecFn 호출(orca 좌석 조회) · wake = wake 영수증 appendFn 호출 ·
+//   seal-start = 봉인 단계가 가장 먼저 하는 일(상태 파일 읽기) · seal-git = 봉인의 git 호출.
+// repoRoot 는 합성 디렉터리다 -- 실제 체크아웃의 `.harness` 나 상태를 읽지 않는다(ⓗ ⑵).
+// 기준 시각 T0 는 위에서 UTC 로 고정했고 이 칸들은 로컬 시각 생성자 · 접근자 · toLocale 에
+// 기대지 않는다(ⓗ ⑴).
+function makeOrderWorld() {
+  const w = makeWorld();
+  w.repoRoot = join(w.root, "synthetic-repo");
+  w.admDir = join(w.root, "adm");
+  w.ledgerPath = join(w.admDir, "ledger.json");
+  w.lockPath = join(w.admDir, "ledger.lock");
+  w.wakeStatePath = join(w.root, "wake", "wake-state.json");
+  w.wakeLogPath = join(w.root, "wake", "wake-log.jsonl");
+  fs.mkdirSync(w.repoRoot, { recursive: true });
+  fs.mkdirSync(w.admDir, { recursive: true });
+  // wake 는 watch.log 를 «읽을 수 있어야» 영수증을 남긴다(없으면 읽기 실패로 일찍 끝난다).
+  // 빈 로그를 미리 둔다 -- 이 회차의 줄은 finalize 단계에서 비로소 덧붙는다.
+  fs.mkdirSync(w.watchDir, { recursive: true });
+  fs.writeFileSync(join(w.watchDir, "watch.log"), "");
+  fs.writeFileSync(
+    w.ledgerPath,
+    JSON.stringify({
+      schema_version: ADMISSION_SCHEMA_VERSION,
+      epoch: "2026-08-01T00:00:00.000Z",
+      reservations: {},
+    }),
+  );
+  return w;
+}
+
+function withOrderWorld(fn) {
+  const w = makeOrderWorld();
+  try {
+    return fn(w);
+  } finally {
+    fs.rmSync(w.root, { recursive: true, force: true });
+  }
+}
+
+// sweep · wake · (선택) 봉인을 모두 켠 한 회차. 돌려주는 것 = 회차 결과 + 호출 순서 기록.
+// sealGit(args, opts, events) 가 있으면 봉인 단계가 켜진다(그 함수가 봉인의 git seam).
+function orderCycle(w, { sealGit, sealOptsValue } = {}) {
+  const events = [];
+  const readFn = (p, enc) => {
+    if (String(p).endsWith("anchor-seal-state.json")) events.push("seal-start");
+    return fs.readFileSync(p, enc);
+  };
+  const appendFn = (p, data, enc) => {
+    if (p === w.wakeLogPath) events.push("wake");
+    return fs.appendFileSync(p, data, enc);
+  };
+  const sweepExecFn = () => {
+    events.push("sweep");
+    return { ok: true, result: { terminals: [] } };
+  };
+  const anchorSealArg = sealGit
+    ? {
+        anchorSeal: sealOpts(w, {
+          gitFn: (args, o) => {
+            events.push("seal-git");
+            return sealGit(args, o, events);
+          },
+        }),
+      }
+    : sealOptsValue === undefined
+      ? {}
+      : { anchorSeal: sealOptsValue };
+  const result = runWatchOnce({
+    repoRoot: w.repoRoot,
+    watchDir: w.watchDir,
+    now: T0,
+    capPath: w.capPath,
+    execFn: () => OK_DETECTOR,
+    readFn,
+    appendFn,
+    sweepExecFn,
+    admissionSweep: { ledgerPath: w.ledgerPath, lockPath: w.lockPath },
+    wake: { statePath: w.wakeStatePath, wakeLogPath: w.wakeLogPath },
+    ...anchorSealArg,
+  });
+  return { result, events };
+}
+
+// 두 세계의 줄을 맞대려면 세계마다 다른 경로(cap_source)를 같은 자리표시자로 바꾼다.
+function normLine(w, line) {
+  return line.split(w.capPath).join("@CAP@");
+}
+
+const ETIMEDOUT_ERR = () =>
+  Object.assign(new Error("spawnSync git ETIMEDOUT"), { code: "ETIMEDOUT" });
+
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function assertSealAfterSweepAndWake(events) {
+  const sweep = events.indexOf("sweep");
+  const wake = events.indexOf("wake");
+  const sealStart = events.indexOf("seal-start");
+  const sealGit = events.indexOf("seal-git");
+  assert.ok(sweep >= 0, `sweep 이 기록되지 않았다: ${events.join(",")}`);
+  assert.ok(wake >= 0, `wake 가 기록되지 않았다: ${events.join(",")}`);
+  assert.ok(sealStart >= 0, `봉인 단계가 안 돌았다: ${events.join(",")}`);
+  assert.ok(sealGit >= 0, `봉인 git 이 안 불렸다: ${events.join(",")}`);
+  assert.ok(sweep < wake, `sweep 이 wake 보다 먼저여야 한다: ${events}`);
+  assert.ok(wake < sealStart, `wake 가 봉인보다 먼저여야 한다: ${events}`);
+  assert.ok(sealStart < sealGit, `봉인 시작이 봉인 git 보다 먼저: ${events}`);
+  assert.ok(
+    events.lastIndexOf("wake") < sealStart &&
+      events.lastIndexOf("sweep") < sealStart,
+    `sweep · wake 의 모든 호출이 봉인 시작보다 앞이어야 한다: ${events}`,
+  );
+}
+
+test("⒀ ⑴ 켠 회차의 호출 순서 = sweep → wake → 봉인(상태 읽기 → git) · 봉인은 둘 어느 것보다도 앞서지 않는다", () => {
+  withOrderWorld((w) => {
+    const { result, events } = orderCycle(w, {
+      sealGit: () => ({ status: 1, stdout: "", stderr: "stop-here" }),
+    });
+    assertSealAfterSweepAndWake(events);
+    assert.equal(result.sweepResult.notRun, false);
+    assert.equal(result.sweepResult.ok, true);
+    assert.equal(result.wakeResult.notRun, false);
+    assert.equal(result.anchorSeal.notRun, false);
+  });
+});
+
+test("⒀ ⑵ 봉인 git 이 느려도(망 한도까지 걸린 흉내) 봉인 시작 «전» 에 sweep · wake 는 이미 끝나 있고 · 결과와 회차 줄이 그대로다", () => {
+  let snap = null;
+  const slow = (_args, _o, events) => {
+    if (snap === null) {
+      snap = {
+        events: [...events],
+        wakeReceipt: fs.existsSync(wakeLogPathOf.path)
+          ? fs.readFileSync(wakeLogPathOf.path, "utf8")
+          : null,
+        logText: fs.readFileSync(
+          join(wakeLogPathOf.watchDir, "watch.log"),
+          "utf8",
+        ),
+      };
+    }
+    sleepMs(120);
+    return { status: null, stdout: "", stderr: "", error: ETIMEDOUT_ERR() };
+  };
+  const wakeLogPathOf = { path: "", watchDir: "" };
+  withOrderWorld((off) => {
+    const baseline = orderCycle(off).result;
+    withOrderWorld((w) => {
+      wakeLogPathOf.path = w.wakeLogPath;
+      wakeLogPathOf.watchDir = w.watchDir;
+      const t0 = Date.now();
+      const { result, events } = orderCycle(w, { sealGit: slow });
+      assert.ok(Date.now() - t0 >= 120, "느린 seam 이 실제로 돌았다");
+      // 봉인의 첫 git 호출 «순간» 에 sweep · wake 는 이미 일을 끝냈다.
+      assert.ok(snap, "봉인 git seam 이 불리지 않았다");
+      assert.ok(snap.events.includes("sweep"), `sweep 미완: ${snap.events}`);
+      assert.ok(snap.events.includes("wake"), `wake 미완: ${snap.events}`);
+      assert.ok(snap.wakeReceipt && snap.wakeReceipt.includes('"verdict"'));
+      // 회차 줄은 봉인 결과를 담아 조립되므로(구간 자리 무변) 그 순간엔 아직 덧붙지 않았다.
+      assert.equal(snap.logText, "");
+      assertSealAfterSweepAndWake(events);
+      // 결과: 봉인은 FAILED 로 끝났어도 sweep · wake 결과는 그대로다.
+      assert.equal(result.anchorSeal.failed, true);
+      assert.equal(result.sweepResult.status, "SWEEP_TRIGGER_SWEPT");
+      assert.equal(result.wakeResult.notRun, false);
+      // 줄 = (봉인 없이 같은 입력으로 돈 회차의 줄) + 맨 끝 `anchor-seal:` 구간 -- 형식 무변.
+      const offLine = normLine(off, baseline.line);
+      const onLine = normLine(w, result.line);
+      assert.ok(onLine.startsWith(`${offLine} anchor-seal: FAILED reason=`));
+      assert.match(
+        onLine.slice(offLine.length),
+        /^ anchor-seal: FAILED reason=\S*ETIMEDOUT\S* consecutive=1$/,
+      );
+      assert.equal(lastLogLine(w), result.line);
+    });
+  });
+});
+
+test("⒀ ⑵ 봉인 git 이 던져도 sweep · wake 결과는 회차 기록에 이미 있고 회차 줄 · 생존 기록이 남는다", () => {
+  withOrderWorld((off) => {
+    const baseline = orderCycle(off).result;
+    withOrderWorld((w) => {
+      const { result, events } = orderCycle(w, {
+        sealGit: () => {
+          throw new Error("boom-from-order-seam");
+        },
+      });
+      assertSealAfterSweepAndWake(events);
+      assert.equal(result.anchorSeal.failed, true);
+      assert.equal(result.sweepResult.status, "SWEEP_TRIGGER_SWEPT");
+      assert.equal(result.wakeResult.notRun, false);
+      const offLine = normLine(off, baseline.line);
+      const onLine = normLine(w, result.line);
+      assert.ok(onLine.startsWith(`${offLine} anchor-seal: FAILED reason=`));
+      assert.match(onLine, /boom-from-order-seam/);
+      assert.equal(lastLogLine(w), result.line);
+      assert.ok(fs.existsSync(join(w.watchDir, "last-run.json")));
+      assert.ok(fs.existsSync(w.wakeLogPath), "wake 영수증이 남아 있다");
+    });
+  });
+});
+
+test("⒀ ⑶ 기본 꺼짐(인자 없음 · null · undefined) -> 줄 바이트 같음 · 봉인 흔적 0 · git 0 · sweep → wake 순서는 그대로", () => {
+  const lines = [];
+  for (const sealOptsValue of [undefined, null]) {
+    withOrderWorld((w) => {
+      const { result, events } = orderCycle(w, { sealOptsValue });
+      lines.push(normLine(w, result.line));
+      assert.ok(!result.line.includes("anchor-seal"));
+      assert.equal(result.anchorSeal.notRun, true);
+      // 봉인은 상태 파일도 읽지 않고(seal-start 0) git 도 부르지 않는다(seal-git 0).
+      assert.ok(!events.includes("seal-start"), events.join(","));
+      assert.ok(!events.includes("seal-git"), events.join(","));
+      assert.ok(
+        events.indexOf("sweep") < events.indexOf("wake"),
+        events.join(","),
+      );
+      assert.ok(!fs.existsSync(w.sealDir), "전용 git 디렉터리가 만들어졌다");
+      assert.ok(
+        !fs.readdirSync(w.watchDir).some((n) => n.includes("anchor-seal")),
+        "봉인 흔적 파일이 생겼다",
+      );
+    });
+  }
+  assert.equal(lines.length, 2);
+  assert.equal(lines[0], lines[1]);
+});
+
+test("⒀ ⑷ 망 호출 한도 = 30 초가 실제 spawn 옵션 timeout 으로 전달된다(기본 git 함수 seam)", async () => {
+  const seal = await loadSeal();
+  assert.equal(seal.GIT_CALL_TIMEOUT_MS, 30_000);
+  const seen = [];
+  const res = seal.defaultGitFn(["--version"], {
+    cwd: os.tmpdir(),
+    spawnFn: (cmd, args, o) => {
+      seen.push({ cmd, args, o });
+      return { status: 0, stdout: "git version x", stderr: "", error: null };
+    },
+  });
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].cmd, "git");
+  assert.deepEqual(seen[0].args, ["--version"]);
+  assert.equal(seen[0].o.timeout, 30_000);
+  assert.equal(res.status, 0);
+});
+
+// 봉인 한 회차의 git 호출 수를 회차 모양별로 잰다(실제 runAnchorSealOnce 경로 + 실제 기본
+// git 함수 + 실제 git · mkdtemp 로컬 bare 원격). 호출 수 칸과 상한 칸이 같은 실측을 쓴다.
+async function measureSealCallCounts(seal) {
+  let counts = [];
+  await withWorldAsync(async (w) => {
+    counts = [];
+    const counting = () => {
+      let n = 0;
+      return {
+        fn: (args, o) => {
+          n += 1;
+          return seal.defaultGitFn(args, o);
+        },
+        n: () => n,
+      };
+    };
+    // 가: 원격에 가지가 없는 첫 봉인 · 나: 원천을 바꾼 둘째 봉인(원격 끝 있음) ·
+    // 다: 상태 파일과 전용 git 디렉터리를 «둘 다» 잃은 뒤(원격 끝을 이어받는다 · merge-base 없음) ·
+    // 라: 전용 git 디렉터리만 잃고 상태 파일(lastCommit)은 남은 뒤(init 과 merge-base 가 «함께»
+    //     나오는 가장 긴 경로 -- init 은 «전용 디렉터리 없음», merge-base 는 «상태에 lastCommit +
+    //     원격 끝 있음» 으로 정해져 서로 독립이다).
+    const a = counting();
+    cycle(w, T0, { gitFn: a.fn });
+    counts.push(a.n());
+    fs.appendFileSync(w.northStarFile, "changed\n");
+    const b = counting();
+    cycle(w, T0 + MIN, { gitFn: b.fn });
+    counts.push(b.n());
+    fs.rmSync(w.sealDir, { recursive: true, force: true });
+    fs.rmSync(join(w.watchDir, "anchor-seal-state.json"), { force: true });
+    fs.appendFileSync(w.northStarFile, "changed-again\n");
+    const c = counting();
+    cycle(w, T0 + 2 * MIN, { gitFn: c.fn });
+    counts.push(c.n());
+    fs.rmSync(w.sealDir, { recursive: true, force: true });
+    fs.appendFileSync(w.northStarFile, "changed-third\n");
+    const d = counting();
+    cycle(w, T0 + 3 * MIN, { gitFn: d.fn });
+    counts.push(d.n());
+  });
+  return counts;
+}
+
+test("⒀ ⑷ 회차 호출 수 -- 봉인 한 회차의 git 호출은 모양별 정확한 값 [9, 10, 10, 11] · 최대 11 번", async () => {
+  const seal = await loadSeal();
+  const counts = await measureSealCallCounts(seal);
+  // 가 9 번(init · symbolic-ref · ls-remote · rev-parse · read-tree · add · commit · rev-parse ·
+  // push) · 나 10 번(symbolic-ref · ls-remote · fetch · merge-base · update-ref · reset · add ·
+  // commit · rev-parse · push) · 다 10 번(init · symbolic-ref · ls-remote · fetch · update-ref ·
+  // reset · add · commit · rev-parse · push) · 라 11 번(init · symbolic-ref · ls-remote · fetch ·
+  // merge-base · update-ref · reset · add · commit · rev-parse · push). init 과 merge-base 는
+  // 서로 독립이라 «전용 디렉터리만 잃은» 회차에서 함께 나오고, 그때가 한 회차 최대(11 번)다.
+  // 이 값이 바뀌면(git 호출이 늘면) 아래 상한 칸의 계산이 달라지므로 «정확한 값» 으로 못 박는다.
+  assert.deepEqual(counts, [9, 10, 10, 11]);
+  assert.equal(Math.max(...counts), 11);
+});
+
+test("⒀ ⑷ 회차 최악 시간 상한 -- 최악 호출 수 × 호출 한도 < 생존 기록 신선도 기본 한도(두 상수에서 계산 · 손 숫자 0)", async () => {
+  const seal = await loadSeal();
+  const { DEFAULT_STALE_AFTER_SECONDS } = await import("./schedule-wire.mjs");
+  assert.equal(
+    typeof DEFAULT_STALE_AFTER_SECONDS,
+    "number",
+    "schedule-wire.mjs 가 DEFAULT_STALE_AFTER_SECONDS 를 export 하지 않는다",
+  );
+  const worstCalls = Math.max(...(await measureSealCallCounts(seal)));
+  const worstMs = worstCalls * seal.GIT_CALL_TIMEOUT_MS;
+  const staleMs = DEFAULT_STALE_AFTER_SECONDS * 1000;
+  assert.ok(
+    worstMs < staleMs,
+    `회차 최악 ${worstCalls} × ${seal.GIT_CALL_TIMEOUT_MS}ms = ${worstMs}ms 가 생존 기록 신선도 한도 ${staleMs}ms 이상이다`,
+  );
 });

@@ -1275,7 +1275,7 @@ function parseUpdateBranchLogLine(line, windowStartMs, windowEndMs) {
 }
 
 // 응답 한 건 -> {kind: "rateLimited"|"failure"|"response", ...}. throw 0.
-async function fetchCommitResponse(fetchJson, url) {
+export async function fetchCommitResponse(fetchJson, url) {
   let resp;
   try {
     resp = await fetchJson({ url });
@@ -1298,7 +1298,7 @@ async function fetchCommitResponse(fetchJson, url) {
   return { kind: "response", json: resp.json };
 }
 
-function hasWellFormedCommitShape(json, sha) {
+export function hasWellFormedCommitShape(json, sha) {
   const v = json?.commit?.verification;
   return (
     json !== null &&
@@ -1321,7 +1321,7 @@ function isAllowlistedAuthor(author, allowlist) {
 }
 
 // 서명 확인 -- 이 한 함수가 «확인»의 전부다(서명 · 서명 주체 · 작성자).
-function isVerifiedAllowlistedWebMerge(json, allowlist) {
+export function isVerifiedAllowlistedWebMerge(json, allowlist) {
   const v = json.commit.verification;
   return (
     v.verified === true &&
@@ -1331,7 +1331,7 @@ function isVerifiedAllowlistedWebMerge(json, allowlist) {
   );
 }
 
-async function readExternalEvidenceAllowlist({ git, allowlistPath }) {
+export async function readExternalEvidenceAllowlist({ git, allowlistPath }) {
   const identity = await measureRepoIdentity({ git });
   if (!identity.ok) {
     return { ok: false, reason: `저장소 신원 측정 실패: ${identity.detail}` };
@@ -1621,7 +1621,7 @@ function parseGithubBotAccounts(text) {
 }
 
 // 봇 목록 = origin/master 판본의 설정 파일(허용 목록을 읽는 길과 같은 방식 -- 작업 폴더 판본은 읽지 않는다).
-async function readGithubBotLogins({ git, botAccountsPath }) {
+export async function readGithubBotLogins({ git, botAccountsPath }) {
   let blob;
   try {
     blob = await git.run([

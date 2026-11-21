@@ -46,7 +46,7 @@ export const EXIT_CODE = Object.freeze({
   NOT_EXECUTED: 10,
 });
 
-const DEFAULT_STALE_AFTER_SECONDS = 900; // 15분(등록 주기의 여러 배 -- 호출자가 --stale-after-s로 조정 가능).
+export const DEFAULT_STALE_AFTER_SECONDS = 900; // 15분(등록 주기의 여러 배 -- 호출자가 --stale-after-s로 조정 가능).
 
 const STRING_FLAGS = Object.freeze({
   "--repo-root": "repoRoot",
