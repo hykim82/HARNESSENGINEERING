@@ -18,43 +18,99 @@ import { runReachOnce } from "./reach-report.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REACH_CLI = path.join(HERE, "reach-report.mjs");
+// 시계 규율(HYK-389-shim-clock-1): 이 파일의 «지금» 은 두 종류다.
+//  - NOW = 고정 값. 같은 프로세스 칸(runReachOnce · summarizeShimLedger)은 `now`/
+//    `nowMs` 로 이 값을 «직접 주입» 하므로 실제 시계와 무관하다.
+//  - CLI 자식 프로세스 칸(R7 · R10 · R11)은 자식이 «자기 실제 시계» 로 지난 24시간을
+//    자른다(CLI 에 `--now` 같은 시각 주입 통로가 없다). 그래서 자식 칸은 원장 줄을
+//    NOW 가 아니라 «실행 시점의 실제 시계(childClock)» 기준으로 심는다.
 const NOW = Date.parse("2026-11-19T08:00:00.000Z");
 const HOUR = 60 * 60 * 1000;
+const DAY = 24 * HOUR;
 const SCHEMA = "orca-direct-ledger/1";
 const HEADING = "## ORCH 좌석 직접 쓰기(shim 원장 · OBSERVER)";
 
-function iso(msAgo) {
-  return new Date(NOW - msAgo).toISOString();
+// «base 시각 기준 msAgo 전» 줄을 만드는 묶음. 기본 묶음(boot · write)은 고정 NOW 를
+// 쓰고, 자식 칸은 `ledgerAt(childClock(...))` 로 실제 시계 기준 묶음을 쓴다.
+function ledgerAt(baseMs) {
+  const iso = (msAgo) => new Date(baseMs - msAgo).toISOString();
+  function boot(msAgo, shim, reason = null) {
+    return JSON.stringify({
+      schema: SCHEMA,
+      event: "orch_seat_boot",
+      ts: iso(msAgo),
+      shim,
+      reason,
+      reasons: reason === null ? [] : [reason],
+      role: "ORCH",
+      launcher_mark: "mark",
+      cwd: "C:/synthetic",
+    });
+  }
+  function write(msAgo, domain, verb, { actor = "orch", caller = null } = {}) {
+    return JSON.stringify({
+      schema: SCHEMA,
+      ts: iso(msAgo),
+      pane_key: "pane-synthetic",
+      role: actor === "orch" ? "ORCH" : null,
+      cwd: "C:/synthetic",
+      domain,
+      verb,
+      target: "t1",
+      caller_script: caller,
+      text_len: 1,
+      body_len: null,
+      actor,
+    });
+  }
+  return { iso, boot, write };
 }
 
-function boot(msAgo, shim, reason = null) {
-  return JSON.stringify({
-    schema: SCHEMA,
-    event: "orch_seat_boot",
-    ts: iso(msAgo),
-    shim,
-    reason,
-    reasons: reason === null ? [] : [reason],
-    role: "ORCH",
-    launcher_mark: "mark",
-    cwd: "C:/synthetic",
-  });
+const { iso, boot, write } = ledgerAt(NOW);
+
+// 자식 프로세스의 «지금» = 실행 시점의 실제 시계(+ 흉내 낸 어긋남 shiftMs).
+// shiftMs 가 0 이면 정직한 실제 시계다. 0 이 아니면 runReachCli 가 자식의 Date 를
+// 그만큼 밀어, «실제 시계가 고정 값에서 며칠 뒤» 인 날을 오늘 흉내 낸다.
+function childClock(shiftMs = 0) {
+  return Date.now() + shiftMs;
 }
 
-function write(msAgo, domain, verb, { actor = "orch", caller = null } = {}) {
-  return JSON.stringify({
-    schema: SCHEMA,
-    ts: iso(msAgo),
-    pane_key: "pane-synthetic",
-    role: actor === "orch" ? "ORCH" : null,
-    cwd: "C:/synthetic",
-    domain,
-    verb,
-    target: "t1",
-    caller_script: caller,
-    text_len: 1,
-    body_len: null,
-    actor,
+// 자식의 Date.now()/new Date() 를 HYK389_CLOCK_SHIFT_MS 만큼 미는 preload(합성 임시
+// 폴더 안 파일 · 제품 코드 무접촉). `node --require <파일> reach-report.mjs ...`.
+const CLOCK_SHIFT_PRELOAD = `"use strict";
+const shift = Number(process.env.HYK389_CLOCK_SHIFT_MS || 0);
+const RealDate = Date;
+class ShiftedDate extends RealDate {
+  constructor(...args) {
+    if (args.length === 0) super(RealDate.now() + shift);
+    else super(...args);
+  }
+  static now() {
+    return RealDate.now() + shift;
+  }
+}
+globalThis.Date = ShiftedDate;
+`;
+
+// reach-report CLI 를 자식으로 돈다. 시각 주입 인자가 없으므로 자식 시계는 실제 시계(+shift).
+function runReachCli(box, { shiftMs = 0 } = {}) {
+  const cliArgs = [
+    REACH_CLI,
+    "--report",
+    ...["--watch-log", box.watchLog],
+    ...["--report-out", box.reportOut],
+    ...["--state-path", box.statePath],
+    ...["--notify-dir", box.notifyDir],
+    ...["--shim-ledger", box.ledger],
+  ];
+  if (shiftMs === 0) {
+    return spawnSync(process.execPath, cliArgs, { encoding: "utf8" });
+  }
+  const preload = path.join(box.root, "clock-shift-preload.cjs");
+  writeFileSync(preload, CLOCK_SHIFT_PRELOAD, "utf8");
+  return spawnSync(process.execPath, ["--require", preload, ...cliArgs], {
+    encoding: "utf8",
+    env: { ...process.env, HYK389_CLOCK_SHIFT_MS: String(shiftMs) },
   });
 }
 
@@ -279,23 +335,13 @@ test("R6 shimLedgerPath 를 안 줘도(= watch-run 의 기존 호출 모양) 보
 
 test("R7 CLI 자식 프로세스: --shim-ledger 로 주입한 원장이 화면 출력과 보고 파일에 실린다", () =>
   withRoot((box) => {
+    // 자식은 실제 시계로 지난 24시간을 자른다 -> 줄을 «실제 시계» 기준으로 심는다.
+    const at = ledgerAt(childClock());
     writeLedger(box, [
-      boot(HOUR, "disabled", "CLI_MISSING"),
-      write(HOUR, "orchestration", "task-update"),
+      at.boot(HOUR, "disabled", "CLI_MISSING"),
+      at.write(HOUR, "orchestration", "task-update"),
     ]);
-    const r = spawnSync(
-      process.execPath,
-      [
-        REACH_CLI,
-        "--report",
-        ...["--watch-log", box.watchLog],
-        ...["--report-out", box.reportOut],
-        ...["--state-path", box.statePath],
-        ...["--notify-dir", box.notifyDir],
-        ...["--shim-ledger", box.ledger],
-      ],
-      { encoding: "utf8" },
-    );
+    const r = runReachCli(box);
     assert.equal(r.status, 0, r.stderr);
     assert.ok(r.stdout.includes(HEADING), r.stdout);
     assert.ok(r.stdout.includes("CLI_MISSING 1"), r.stdout);
@@ -407,27 +453,58 @@ test("R9 정본 경로 목록은 «주입 가능» — 주입한 목록이 기�
 
 test("R10 CLI 자식 프로세스: 깨진 줄 1 + 정상 줄 -> 화면 출력에 «[부분 관측 · 깨진 줄 1건]» 표지 · 이름만 같은 호출자는 문 밖으로 센다", () =>
   withRoot((box) => {
+    // 자식은 실제 시계로 지난 24시간을 자른다 -> 줄을 «실제 시계» 기준으로 심는다.
+    const at = ledgerAt(childClock());
     writeLedger(box, [
-      boot(2 * HOUR, "enabled"),
+      at.boot(2 * HOUR, "enabled"),
       "{ torn",
-      write(HOUR, "terminal", "send", { caller: DOOR }),
-      write(HOUR, "terminal", "send", { caller: "C:/x/dispatch-worker.ps1" }),
+      at.write(HOUR, "terminal", "send", { caller: DOOR }),
+      at.write(HOUR, "terminal", "send", {
+        caller: "C:/x/dispatch-worker.ps1",
+      }),
     ]);
-    const r = spawnSync(
-      process.execPath,
-      [
-        REACH_CLI,
-        "--report",
-        ...["--watch-log", box.watchLog],
-        ...["--report-out", box.reportOut],
-        ...["--state-path", box.statePath],
-        ...["--notify-dir", box.notifyDir],
-        ...["--shim-ledger", box.ledger],
-      ],
-      { encoding: "utf8" },
-    );
+    const r = runReachCli(box);
     assert.equal(r.status, 0, r.stderr);
     assert.ok(r.stdout.includes("[부분 관측 · 깨진 줄 1건]"), r.stdout);
+    assert.ok(r.stdout.includes("설계된 문 밖 직접 쓰기 1건"), r.stdout);
+    assert.ok(r.stdout.includes("문 안 1건"), r.stdout);
+  }));
+
+// 시험 칸(HYK-389-shim-clock-1): 실제 시계가 고정 NOW 에서 «며칠 뒤» 여도 초록이다.
+// 자식에 시각 주입 통로가 없으므로, 자식의 Date 를 +7일 밀어(preload · 제품 코드 무접촉)
+// «고정 NOW 에서 며칠 뒤의 실제 시계» 를 오늘 흉내 낸다. 줄을 고정 NOW 기준으로 심으면
+// (옛 R7 · R10 모양) 자식의 24시간 창 밖이라 이 칸이 빨강이 된다 -- 실제 시계 기준으로
+// 심은 것 자체가 이 칸의 초록 근거다.
+test("R11 CLI 자식 프로세스: 자식 시계가 고정 NOW 에서 며칠 뒤(+7일)여도 실제 시계 기준으로 심은 원장 · 깨진 줄 처리가 화면 출력에 실린다", () =>
+  withRoot((box) => {
+    const shiftMs = 7 * DAY;
+    const at = ledgerAt(childClock(shiftMs));
+    writeLedger(box, [
+      at.boot(2 * HOUR, "disabled", "CLI_MISSING"),
+      "{ torn",
+      at.write(HOUR, "orchestration", "task-update"),
+      at.write(HOUR, "terminal", "send", { caller: DOOR }),
+    ]);
+    const r = runReachCli(box, { shiftMs });
+    assert.equal(r.status, 0, r.stderr);
+    // preload 가 실제로 먹었는지: 보고 머리의 «기준» 시각이 (실제 시계 + 7일) 근처이고,
+    // 고정 NOW 에서 7일 이상 뒤다.
+    const stamped = /-- (\S+) 기준/.exec(r.stdout);
+    assert.ok(stamped, r.stdout);
+    const childNow = Date.parse(stamped[1]);
+    assert.ok(
+      Math.abs(childNow - (Date.now() + shiftMs)) < 5 * 60 * 1000,
+      r.stdout,
+    );
+    assert.ok(
+      childNow - NOW >= 7 * DAY,
+      `${stamped[1]} 는 고정 NOW 에서 7일 이상 뒤여야 한다`,
+    );
+    // R7 · R10 과 같은 단언(약화 0): 원장이 실리고 · 깨진 줄은 부분 관측으로 센다.
+    assert.ok(r.stdout.includes(HEADING), r.stdout);
+    assert.ok(r.stdout.includes("[부분 관측 · 깨진 줄 1건]"), r.stdout);
+    assert.ok(r.stdout.includes("CLI_MISSING 1"), r.stdout);
+    assert.ok(r.stdout.includes("orchestration task-update 1"), r.stdout);
     assert.ok(r.stdout.includes("설계된 문 밖 직접 쓰기 1건"), r.stdout);
     assert.ok(r.stdout.includes("문 안 1건"), r.stdout);
   }));
