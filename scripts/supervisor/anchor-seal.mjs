@@ -89,6 +89,11 @@
 //  9. typed 턴의 본문 해시는 «그 줄 바이트» 만 굳힌다 -- 줄이 세션 파일에서 통째로 지워지면
 //     (잎이 줄어들어) 뿌리는 바뀌지만, 그 줄이 «원래 어떤 내용이었는지» 는 원격에 없다.
 //     봉인 뒤 변조 대조(위 한 줄)는 아직 사람 손이고, 봉인 자격은 ORCH 손에 있다(한계 2).
+//  10. (HYK-255-seal-orphan-1) 저속 한도(env · 1000 B/s · 15 초)는 «HTTP(S) 전송 중 멎음» 만 덮는다 --
+//     연결 수립 멎음 · ssh · scp 형식 원격 · 로컬 호출 · 손자가 관을 쥔 호출(git 은 0 으로 끝났는데
+//     30 초 한도에 닿는 모양)에서는 한도에 닿은 호출의 손자 · sh 가 «고아로 남는다»(수리는 보고만
+//     바로잡고 `lingering=N` 으로 드러낸다) · 원격이 받은 뒤 git 자신이 한도에 죽으면 FAILED + 다음
+//     회차 중복 줄. 값은 계산으로 골랐고 이 기계에서 실제 원격으로 잰 값은 없다(못 쟀다).
 //
 // Node 20 호환 -- ESM 표준 API 만 사용. 외부 의존 0. 사용자 절대 경로 · 실제 원격 기본값 0.
 import { createHash } from "node:crypto";
@@ -454,7 +459,76 @@ function cleanGitEnv(env) {
 //  단계가 «즉시» 실패로 끝나므로(FAILED · 다음 회차가 같은 내용으로 다시 시도) 실제 막힘은
 //  30 초 + 앞선 정상 호출 시간이다. 봉인 저장소는 줄 하나씩 쌓이는 작은 가지라 정상 ls-remote ·
 //  fetch · push 는 수 초 안이다(이 기계에서 실제 원격으로 잰 값은 없다 -- 못 쟀다).
+//  (HYK-255-seal-orphan-1 · 판정 0654 · 0725) 한도에 닿으면 spawnSync 는 «직접 자식(이 기계에서는
+//  git 감싸개)만» 죽여 진짜 git 과 그 자식이 고아로 남는다. 그래서 망 호출은 env 저속 한도
+//  (GIT_HTTP_LOW_SPEED_LIMIT/TIME)로 «진짜 git 이 스스로 끝나게» 한다 -- 시간(15 초)을 호출 한도(30 초)의
+//  절반 이하로 잡아 HTTP 가 멎으면 한도보다 먼저 git 이 `exit 128` 로 끝나고 spawnSync 는 정상
+//  반환한다(죽일 대상 없음). env 는 config(`-c` 포함)를 덮으므로 `-c` 가 아니라 env 로 싣는다.
+//  git 은 0 으로 끝났는데 손자가 출력 관을 쥐어 30 초 한도에 닿는 모양(status 0 + ETIMEDOUT)은
+//  `classifyGitResult` 가 종료 코드 전용 호출에서만 성공으로 읽고 `lingering` 으로 소리를 남긴다.
 export const GIT_CALL_TIMEOUT_MS = 30_000;
+export const GIT_HTTP_LOW_SPEED_LIMIT_BPS = 1000;
+export const GIT_HTTP_LOW_SPEED_TIME_S = 15;
+
+// 출력을 쓰지 않거나 종료 코드만 쓰는 하위 명령. «목록 밖은 출력을 쓰는 것으로 본다» (ls-remote ·
+// rev-parse · 앞으로 생길 호출 = 실패 쪽 기본값).
+export const GIT_EXIT_ONLY_SUBCOMMANDS = Object.freeze([
+  "init",
+  "symbolic-ref",
+  "fetch",
+  "merge-base",
+  "update-ref",
+  "reset",
+  "read-tree",
+  "add",
+  "commit",
+  "push",
+]);
+
+function lowSpeedEnv() {
+  return {
+    GIT_HTTP_LOW_SPEED_LIMIT: String(GIT_HTTP_LOW_SPEED_LIMIT_BPS),
+    GIT_HTTP_LOW_SPEED_TIME: String(GIT_HTTP_LOW_SPEED_TIME_S),
+  };
+}
+
+// 한도에 닿은(error ETIMEDOUT · status 가 정수인) 결과: status 0 + 종료 코드 전용 호출만 성공.
+function classifyAfterTimeout(res, sub) {
+  if (res.status !== 0) {
+    throw new Error(`git ${sub} exit ${res.status} after timeout: ETIMEDOUT`);
+  }
+  if (!GIT_EXIT_ONLY_SUBCOMMANDS.includes(sub)) {
+    throw new Error(`git ${sub} output untrusted after timeout: ETIMEDOUT`);
+  }
+  return { res, lingering: 1 };
+}
+
+// git 호출 결과 판정(순수). 회차 `run` 과 init 이 «둘 다» 이것만 쓴다. 성공이면 {res, lingering}
+// (lingering 1 = 종료 코드 전용 호출이 status 0 으로 끝났는데 한도에 닿음) · 아니면 던진다.
+//  1 error 가 있고 ETIMEDOUT 이 아니면 던짐(start failed) · 2 status 가 정수가 아니면(null) 던짐 --
+//  allowFail 도 삼키지 않는다 · 3 ETIMEDOUT 이면 classifyAfterTimeout · 4 status 0 이면 성공 ·
+//  5 allowFail 이면 돌려줌(호출자가 0/1 을 읽는다) · 6 던짐(exit N).
+export function classifyGitResult(
+  res,
+  { sub, allowFail = false, secret } = {},
+) {
+  const code = res.error ? errCode(res.error) : null;
+  if (code !== null && code !== "ETIMEDOUT") {
+    throw new Error(`git ${sub} start failed: ${code}`);
+  }
+  if (!Number.isInteger(res.status)) {
+    throw new Error(
+      code === "ETIMEDOUT"
+        ? `git ${sub} timeout: ETIMEDOUT`
+        : `git ${sub} killed`,
+    );
+  }
+  if (code === "ETIMEDOUT") return classifyAfterTimeout(res, sub);
+  if (res.status === 0 || allowFail) return { res, lingering: 0 };
+  throw new Error(
+    `git ${sub} exit ${res.status}: ${firstLine(res.stderr, secret)}`,
+  );
+}
 
 export function defaultGitFn(args, opts = {}) {
   // opts.spawnFn: 시험 seam(한도가 실제 spawn 옵션으로 가는지 본다). 운영 호출자는 안 준다.
@@ -596,24 +670,27 @@ function makeRunner({ gitFn, sealDir, authArgs, pat, botLogin }) {
     "user.email=anchor-seal@anchor-seal.invalid",
   ];
   const baseEnv = cleanGitEnv(process.env);
-  return function run(sub, { net = false, allowFail = false, env = {} } = {}) {
+  // 이 회차에서 «종료 코드 전용 호출이 status 0 으로 끝났는데 한도에 닿은» 횟수(lingering).
+  const stats = { lingering: 0 };
+  function run(sub, { net = false, allowFail = false, env = {} } = {}) {
     const args = [...base, ...(net ? authArgs : []), ...sub];
     const callEnv = {
       ...baseEnv,
+      ...(net ? lowSpeedEnv() : {}),
       ...(net && pat ? buildGitAuthEnv(pat, botLogin) : {}),
       ...env,
     };
     const res = gitFn(args, { cwd: sealDir, env: callEnv });
-    if (res.error) {
-      throw new Error(`git ${sub[0]} start failed: ${errCode(res.error)}`);
-    }
-    if (res.status !== 0 && !allowFail) {
-      throw new Error(
-        `git ${sub[0]} exit ${res.status}: ${firstLine(res.stderr, pat)}`,
-      );
-    }
+    const verdict = classifyGitResult(res, {
+      sub: sub[0],
+      allowFail,
+      secret: pat,
+    });
+    stats.lingering += verdict.lingering;
     return res;
-  };
+  }
+  run.stats = stats;
+  return run;
 }
 
 function ensureSealRepo({ sealDir, gitFn, run }) {
@@ -623,11 +700,7 @@ function ensureSealRepo({ sealDir, gitFn, run }) {
       cwd: sealDir,
       env: cleanGitEnv(process.env),
     });
-    if (init.error || init.status !== 0) {
-      throw new Error(
-        `git init failed: ${init.error ? errCode(init.error) : init.status}`,
-      );
-    }
+    run.stats.lingering += classifyGitResult(init, { sub: "init" }).lingering;
   }
   run(["symbolic-ref", "HEAD", SEAL_REF]);
 }
@@ -902,6 +975,13 @@ function sealAndPush({ ctx, state, roots }) {
     commit,
     roots,
     adoptedRemoteTip: verdict.adopted,
-    segment: `anchor-seal: sealed none=${none} read_error=${readError}`,
+    segment: sealedSegment({ none, readError, lingering: run.stats.lingering }),
   };
+}
+
+// 구간: lingering 이 0 이면 수리 전과 바이트 같고, >0 일 때만 ` lingering=N` 을 덧붙인다
+// (종료 코드 전용 호출이 status 0 으로 끝났는데 한도에 닿았다 -- 조용히 삼키지 않는다).
+function sealedSegment({ none, readError, lingering }) {
+  const head = `anchor-seal: sealed none=${none} read_error=${readError}`;
+  return lingering > 0 ? `${head} lingering=${lingering}` : head;
 }
