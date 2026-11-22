@@ -543,6 +543,86 @@ function issueIdFrom(taskIdLike) {
   return m ? m[1] : null;
 }
 
+// ---- HYK-464 추기 4: 레인 단위 연속 반려 계수(읽을 때 접는다 · 저장하지 않는다) ----
+// 이슈 단위 streak 은 같은 이슈의 «다른 레인» 승인이 끼면 0 으로 지워진다
+// (2026-11-20 실물: HYK-255 의 seal-order 반려 → rescan-core 승인). 그래서
+// 레인(= 과제 라벨 줄기)별 계수를 원장의 history[].task_id 에서 «읽을 때»
+// 접는다 -- 원장 형태 · 쓰기 경로 · applyOutcome 의 이슈 계수는 그대로다.
+// ⛔이 함수들을 새 모듈로 옮기지 마라: 격리 시험이 손으로 적은 형제 파일
+// 목록(relay-handshake-fixture-siblings.mjs · dispatch-gate-decision-deps.mjs)에
+// 없는 모듈은 모듈 없음으로 죽는다(위 HYK-450 ② 실측 주석).
+const REVIEW_ROUND_SUFFIX_RE = /-review-\d+$/;
+const LANE_STEM_RE = /^(HYK-\d+-[a-z][a-z0-9]*(?:-[a-z0-9]+)*?)-\d+(?:-r\d+)?$/;
+
+// 과제 라벨 → 레인 줄기. 끝의 `-review-<n>` 을 떼고(검토 라운드는 작성 라운드와
+// 같은 레인), `<줄기>-<라운드>[-r<n>]` 꼴이면 줄기를 돌려준다. 못 뽑으면 null
+// (맨 이슈 번호 · 묶음 · 꼴 밖 라벨).
+export function laneKeyFrom(taskIdLike) {
+  if (typeof taskIdLike !== "string") return null;
+  const m = taskIdLike.replace(REVIEW_ROUND_SUFFIX_RE, "").match(LANE_STEM_RE);
+  return m ? m[1] : null;
+}
+
+// history → { <줄기>: 연속 반려 수 }. applyOutcome 의 이슈 규칙(반려 +1 ·
+// 그 밖 0)을 레인마다 적용한다. 줄기를 못 뽑는 항목은 건너뛴다. 던지지 않는다.
+export function foldLaneStreaks(history) {
+  const lanes = {};
+  if (!Array.isArray(history)) return lanes;
+  for (const entry of history) {
+    const lane = laneKeyFrom(entry?.task_id);
+    if (lane === null) continue;
+    lanes[lane] = entry.verdict === "rejected" ? (lanes[lane] ?? 0) + 1 : 0;
+  }
+  return lanes;
+}
+
+// 게이트가 쓰는 실효 계수: eff = max(이슈 streak, 배달할 과제의 레인 계수).
+// 라벨이 꼴 밖이면 그 이슈의 «가장 나쁜 레인» 을 물려받는다(옆문 차단).
+export function resolveEffStreak({ ledger, issueId, taskId }) {
+  const entry = ledger?.issues?.[issueId];
+  const issueStreak = entry?.streak ?? 0;
+  const lanes = foldLaneStreaks(entry?.history);
+  const laneKey = laneKeyFrom(taskId);
+  const stems = Object.keys(lanes);
+  const laneStreak =
+    laneKey === null
+      ? Math.max(0, ...stems.map((k) => lanes[k]))
+      : (lanes[laneKey] ?? 0);
+  const eff = laneStreak > issueStreak ? laneStreak : issueStreak;
+  return {
+    issueStreak,
+    laneKey,
+    laneStreak,
+    eff,
+    laneDriven: eff > issueStreak,
+    suffix: ` lane[${laneKey ?? "*worst"}]=${laneStreak} eff=${eff}`,
+    note: newStemNote(issueId, laneKey, lanes),
+  };
+}
+
+// 상신 1815 A · 설계 (아) 1 보완 ⓑ: 다른 레인 계수가 ≥1 인 이슈에 «새 줄기»가
+// 처음 나타나면 사유 줄에 덧붙일 NOTE(막지 않는다). 해당 없으면 빈 문자열.
+function newStemNote(issueId, laneKey, lanes) {
+  if (laneKey === null || Object.hasOwn(lanes, laneKey)) return "";
+  const others = Object.keys(lanes).filter((k) => lanes[k] >= 1);
+  if (others.length === 0) return "";
+  const shown = others.map((k) => `${k}=${lanes[k]}`).join(", ");
+  return ` NOTE: new lane stem '${laneKey}' on ${issueId} while other lane(s) are rejected (${shown}) -- a rework must keep its lane stem; not blocked`;
+}
+
+// 읽기 전용 `lanes --issue` 보고(쓰기 0): 이슈 계수 + 레인별 계수 한 줄씩.
+export function formatLanesReport({ ledger, issueId }) {
+  const entry = ledger?.issues?.[issueId];
+  const history = Array.isArray(entry?.history) ? entry.history : [];
+  const lanes = foldLaneStreaks(history);
+  const stems = Object.keys(lanes).sort();
+  const skipped = history.filter((h) => laneKeyFrom(h?.task_id) === null);
+  return [
+    `reject-streak lanes: ${issueId} issue streak=${entry?.streak ?? 0} history=${history.length} lanes=${stems.length} no-lane-key=${skipped.length}`,
+    ...stems.map((k) => `lane[${k}]=${lanes[k]}`),
+  ];
+}
+
 // A source file authored/edited on Windows (this repo's own docs/*.md, seen
 // live when review-1's doc-code contract test extracted a CRLF-line block
 // straight out of docs/enforcement-v1.md) can carry `\r\n` line endings.
@@ -1080,27 +1160,35 @@ export function checkGate({ taskText, ledger }) {
     };
   }
 
-  const streak = ledger?.issues?.[issueId]?.streak ?? 0;
-  if (streak < 2) {
+  // HYK-464 추기 4: 판정 값 = eff = max(이슈 streak, 레인 계수). 문턱 2 ·
+  // 봉투 형식 · 종료 코드 계약은 그대로다.
+  const r = resolveEffStreak({
+    ledger,
+    issueId,
+    taskId: taskIdMatch[1],
+  });
+  const streak = r.issueStreak;
+  if (r.eff < 2) {
     return {
       status: "PASS",
       ok: true,
-      reason: `reject-streak gate: ${issueId} streak=${streak} (<2) -- envelope not required`,
+      reason: `reject-streak gate: ${issueId} streak=${streak} (<2) -- envelope not required${r.suffix}${r.note}`,
     };
   }
 
+  const tag = `${r.laneDriven ? "eff" : ""}>=2`;
   const envelope = checkEnvelope(text);
   if (!envelope.ok) {
     return {
       status: "BLOCK",
       ok: false,
-      reason: `reject-streak gate: ${issueId} streak=${streak} (>=2) -- ${envelope.reason}`,
+      reason: `reject-streak gate: ${issueId} streak=${streak} (${tag}) -- ${envelope.reason}${r.suffix}${r.note}`,
     };
   }
   return {
     status: "PASS",
     ok: true,
-    reason: `reject-streak gate: ${issueId} streak=${streak} (>=2) -- ${envelope.reason}`,
+    reason: `reject-streak gate: ${issueId} streak=${streak} (${tag}) -- ${envelope.reason}${r.suffix}${r.note}`,
   };
 }
 
@@ -1190,12 +1278,18 @@ export function checkDiagnosticGate({ taskText, ledger }) {
     };
   }
 
-  const streak = ledger?.issues?.[issueId]?.streak ?? 0;
-  if (streak < HARD_STOP_STREAK) {
+  // HYK-464 추기 4: checkGate 와 같은 eff = max(이슈 streak, 레인 계수) 에 건다.
+  const r = resolveEffStreak({
+    ledger,
+    issueId,
+    taskId: taskIdMatch[1],
+  });
+  const streak = r.issueStreak;
+  if (r.eff < HARD_STOP_STREAK) {
     return {
       status: "PASS",
       ok: true,
-      reason: `reject-streak diagnostic gate: ${issueId} streak=${streak} (<${HARD_STOP_STREAK}, not hard-stop) -- diagnostic envelope not required`,
+      reason: `reject-streak diagnostic gate: ${issueId} streak=${streak} (<${HARD_STOP_STREAK}, not hard-stop) -- diagnostic envelope not required${r.suffix}`,
     };
   }
 
@@ -1204,13 +1298,13 @@ export function checkDiagnosticGate({ taskText, ledger }) {
     return {
       status: "BLOCK",
       ok: false,
-      reason: `reject-streak diagnostic gate: ${issueId} streak=${streak} (hard-stop) -- ${diag.reason}`,
+      reason: `reject-streak diagnostic gate: ${issueId} streak=${streak} (hard-stop) -- ${diag.reason}${r.suffix}`,
     };
   }
   return {
     status: "PASS",
     ok: true,
-    reason: `reject-streak diagnostic gate: ${issueId} streak=${streak} (hard-stop) -- ${diag.reason}`,
+    reason: `reject-streak diagnostic gate: ${issueId} streak=${streak} (hard-stop) -- ${diag.reason}${r.suffix}`,
   };
 }
 
@@ -1225,6 +1319,7 @@ function parseArgs(args) {
     if (args[i] === "--review") out.review = args[++i];
     else if (args[i] === "--ledger") out.ledger = args[++i];
     else if (args[i] === "--at") out.at = args[++i];
+    else if (args[i] === "--issue") out.issue = args[++i];
     else out._.push(args[i]);
   }
   return out;
@@ -1339,6 +1434,30 @@ if (invokedDirectly) {
     process.exit(0);
   }
 
+  // HYK-464 추기 4: 읽기 전용 -- 원장 파일을 열어 읽기만 하고 쓰지 않는다.
+  if (sub === "lanes") {
+    const ledgerPath =
+      args.ledger || join(ledgerRepoRoot(), ".harness", "reject-streak.json");
+    if (!args.issue || !/^HYK-\d+$/.test(args.issue)) {
+      console.error(
+        "reject-streak lanes: --issue <HYK-n> is required (e.g. --issue HYK-255)",
+      );
+      process.exit(1);
+    }
+    const loaded = loadLedger(ledgerPath);
+    if (!loaded.ok) {
+      console.error(loaded.reason);
+      process.exit(1);
+    }
+    for (const line of formatLanesReport({
+      ledger: loaded.ledger,
+      issueId: args.issue,
+    })) {
+      console.log(line);
+    }
+    process.exit(0);
+  }
+
   console.error(
     "usage: node reject-streak.mjs record --review <path> [--ledger <path>] [--at <'YYYY-MM-DD HH:MM KST'>]",
   );
@@ -1347,6 +1466,9 @@ if (invokedDirectly) {
   );
   console.error(
     "       node reject-streak.mjs diagnostic-gate [<task-path>] [--ledger <path>]",
+  );
+  console.error(
+    "       node reject-streak.mjs lanes --issue <HYK-n> [--ledger <path>]   (read-only)",
   );
   process.exit(1);
 }
