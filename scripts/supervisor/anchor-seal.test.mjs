@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import { join } from "node:path";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import * as watchRun from "./watch-run.mjs";
@@ -1874,6 +1874,7 @@ test("⒀ ⑷ 회차 호출 수 -- 봉인 한 회차의 git 호출은 모양별 
   assert.equal(Math.max(...counts), 11);
 });
 
+// 쌍: 위 호출 수 칸이 못 박은 최대 11 이 이 상한 칸의 «최악 호출 수» 다 -- 한쪽을 바꾸면 다른 쪽 계산도 같이 본다.
 test("⒀ ⑷ 회차 최악 시간 상한 -- 최악 호출 수 × 호출 한도 < 생존 기록 신선도 기본 한도(두 상수에서 계산 · 손 숫자 0)", async () => {
   const seal = await loadSeal();
   const { DEFAULT_STALE_AFTER_SECONDS } = await import("./schedule-wire.mjs");
@@ -1890,3 +1891,674 @@ test("⒀ ⑷ 회차 최악 시간 상한 -- 최악 호출 수 × 호출 한도 
     `회차 최악 ${worstCalls} × ${seal.GIT_CALL_TIMEOUT_MS}ms = ${worstMs}ms 가 생존 기록 신선도 한도 ${staleMs}ms 이상이다`,
   );
 });
+
+// ---------------------------------------------------------------------------
+// ⒁ 봉인 선행 수리 둘 (HYK-255-seal-orphan-1 · 판정 #20261123-0654 · #20261123-0725)
+// ---------------------------------------------------------------------------
+// ① 멎은 망 호출이 «고아 git» 을 남기지 않게 진짜 git 이 스스로 끝나는 저속 한도(env 로 운반) ·
+// ② git 은 0 으로 끝났는데 손자가 관을 쥐어 30 초 한도에 닿은 «성공을 실패로» 판정(status 0 +
+// ETIMEDOUT) 을 종료 코드 전용 호출에서만 성공으로 바로잡는 순수 분류기 -- 의 시험이다.
+// 전부 합성: mkdtemp · `git init --bare` 원격 · 127.0.0.1 루프백. ⛔실제 원격 호출 0 · 실제 PAT
+// 파일 읽기 0 · 실제 `.harness` 읽기 0 · 봉인은 여전히 꺼져 있다(`--anchor-seal-remote` 는 어디에도
+// 없다). I · R 칸은 프로덕션 `runAnchorSealOnce` → 회차 `run` → 실제 `defaultGitFn` 경로를 그대로
+// 지난다(덧입히는 것은 결과 모양뿐이고 그 모양이 실제로 있다는 것은 R1 이 실제 git 으로 보인다).
+// 기대값은 시험 안에서 손으로 정한 값이다(분류기로 기대값을 만들지 않는다).
+
+// 봉인 한 회차(프로덕션 진입점). repoRoot 는 합성 디렉터리다(실제 체크아웃을 읽지 않는다).
+function sealOnce(seal, w, now, gitFn) {
+  return seal.runAnchorSealOnce({
+    ...sealOpts(w, gitFn ? { gitFn } : {}),
+    repoRoot: join(w.root, "synthetic-repo"),
+    watchDir: w.watchDir,
+    now,
+  });
+}
+
+function sealFailure(seal, w, now, gitFn) {
+  try {
+    sealOnce(seal, w, now, gitFn);
+  } catch (err) {
+    return err;
+  }
+  return assert.fail("회차가 던져야 한다(FAILED)");
+}
+
+// git 인자에서 하위 명령 이름을 뽑는다(앞의 --git-dir · --work-tree · -c 쌍은 건너뛴다).
+function gitSubOf(args) {
+  for (let i = 0; i < args.length; i += 1) {
+    const a = String(args[i]);
+    if (a === "--git-dir" || a === "--work-tree" || a === "-c") {
+      i += 1;
+    } else if (!a.startsWith("-")) {
+      return a;
+    }
+  }
+  return null;
+}
+
+// 실제 defaultGitFn 에 «위임» 한 뒤 지정한 호출의 결과에만 모양을 덧입힌다(실제 git 이 실제로
+// 돈다 · 덧입힌 호출 수를 hits 로 센다 -- 헛시험 차단).
+function overlayGitFn(seal, match, shape) {
+  const fn = (args, o) => {
+    const real = seal.defaultGitFn(args, o);
+    fn.calls.push(gitSubOf(args));
+    if (!match(gitSubOf(args), args)) return real;
+    fn.hits += 1;
+    return shape(real);
+  };
+  fn.calls = [];
+  fn.hits = 0;
+  return fn;
+}
+
+const asExitedButTimedOut = (real) => ({ ...real, error: ETIMEDOUT_ERR() });
+const asKilledAndTimedOut = (real) => ({
+  ...real,
+  status: null,
+  error: ETIMEDOUT_ERR(),
+});
+const asKilledNoError = (real) => ({ ...real, status: null, error: null });
+
+function lowSpeedKeysOff(fn) {
+  const saved = {};
+  for (const k of ["GIT_HTTP_LOW_SPEED_LIMIT", "GIT_HTTP_LOW_SPEED_TIME"]) {
+    saved[k] = process.env[k];
+    delete process.env[k];
+  }
+  try {
+    return fn();
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v !== undefined) process.env[k] = v;
+    }
+  }
+}
+
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === "EPERM";
+  }
+}
+
+function waitPidGone(pid, limitMs) {
+  const until = Date.now() + limitMs;
+  while (isPidAlive(pid) && Date.now() < until) sleepMs(100);
+  return !isPidAlive(pid);
+}
+
+// ── T1 분류기 진리표 18칸 ──────────────────────────────────────────────
+// E = 종료 코드 전용 호출(push) · O = 출력을 쓰는 호출(rev-parse). 칸마다 allowFail 두 값.
+const T1_SUB = { E: "push", O: "rev-parse" };
+const T1_ENOENT = /git \S+ start failed: ENOENT/;
+const T1_KILLED = /git \S+ killed/;
+const T1_TIMEOUT = /git \S+ timeout: ETIMEDOUT/;
+const T1_UNTRUSTED = /git \S+ output untrusted after timeout/;
+const T1_EXIT1_LATE = /git \S+ exit 1 after timeout/;
+const T1_EXIT1 = /git \S+ exit 1(:|$)/;
+// [번호, status, error code, 종류, allowFail=false 기대, allowFail=true 기대]
+// 기대: {lingering: n} = 던지지 않고 돌려줌(lingering n) · {throws: 정규식} = 던짐
+const T1_ROWS = [
+  [1, 0, null, "E", { lingering: 0 }, { lingering: 0 }],
+  [2, 0, null, "O", { lingering: 0 }, { lingering: 0 }],
+  [3, 1, null, "E", { throws: T1_EXIT1 }, { lingering: 0 }],
+  [4, 1, null, "O", { throws: T1_EXIT1 }, { lingering: 0 }],
+  [5, null, null, "E", { throws: T1_KILLED }, { throws: T1_KILLED }],
+  [6, null, null, "O", { throws: T1_KILLED }, { throws: T1_KILLED }],
+  [7, 0, "ETIMEDOUT", "E", { lingering: 1 }, { lingering: 1 }],
+  [8, 0, "ETIMEDOUT", "O", { throws: T1_UNTRUSTED }, { throws: T1_UNTRUSTED }],
+  [
+    9,
+    1,
+    "ETIMEDOUT",
+    "E",
+    { throws: T1_EXIT1_LATE },
+    { throws: T1_EXIT1_LATE },
+  ],
+  [
+    10,
+    1,
+    "ETIMEDOUT",
+    "O",
+    { throws: T1_EXIT1_LATE },
+    { throws: T1_EXIT1_LATE },
+  ],
+  [11, null, "ETIMEDOUT", "E", { throws: T1_TIMEOUT }, { throws: T1_TIMEOUT }],
+  [12, null, "ETIMEDOUT", "O", { throws: T1_TIMEOUT }, { throws: T1_TIMEOUT }],
+  [13, 0, "ENOENT", "E", { throws: T1_ENOENT }, { throws: T1_ENOENT }],
+  [14, 0, "ENOENT", "O", { throws: T1_ENOENT }, { throws: T1_ENOENT }],
+  [15, 1, "ENOENT", "E", { throws: T1_ENOENT }, { throws: T1_ENOENT }],
+  [16, 1, "ENOENT", "O", { throws: T1_ENOENT }, { throws: T1_ENOENT }],
+  [17, null, "ENOENT", "E", { throws: T1_ENOENT }, { throws: T1_ENOENT }],
+  [18, null, "ENOENT", "O", { throws: T1_ENOENT }, { throws: T1_ENOENT }],
+];
+
+for (const [no, status, code, kind, noAllow, withAllow] of T1_ROWS) {
+  test(`⒁ T1 #${no} 분류기 진리표 -- status ${status} · error ${code ?? "없음"} · ${kind === "E" ? "종료 코드 전용(E)" : "출력 사용(O)"} · allowFail 두 값`, async () => {
+    const seal = await loadSeal();
+    for (const [allowFail, expected] of [
+      [false, noAllow],
+      [true, withAllow],
+    ]) {
+      const res = {
+        status,
+        stdout: "",
+        stderr: "boom",
+        error: code ? Object.assign(new Error(code), { code }) : null,
+      };
+      const call = () =>
+        seal.classifyGitResult(res, { sub: T1_SUB[kind], allowFail });
+      const label = `#${no} allowFail=${allowFail}`;
+      if (expected.throws) {
+        assert.throws(call, expected.throws, label);
+      } else {
+        const verdict = call();
+        assert.equal(verdict.lingering, expected.lingering, label);
+        assert.equal(verdict.res.status, status, label);
+      }
+    }
+  });
+}
+
+test("⒁ T2 종료 코드 전용 목록 = 정확히 열 개 · 목록 밖(foo · ls-remote · rev-parse)은 7번 모양에서도 던진다", async () => {
+  const seal = await loadSeal();
+  assert.deepEqual([...seal.GIT_EXIT_ONLY_SUBCOMMANDS].sort(), [
+    "add",
+    "commit",
+    "fetch",
+    "init",
+    "merge-base",
+    "push",
+    "read-tree",
+    "reset",
+    "symbolic-ref",
+    "update-ref",
+  ]);
+  const shape7 = {
+    status: 0,
+    stdout: "",
+    stderr: "",
+    error: Object.assign(new Error("ETIMEDOUT"), { code: "ETIMEDOUT" }),
+  };
+  for (const sub of ["foo", "ls-remote", "rev-parse"]) {
+    assert.throws(
+      () => seal.classifyGitResult(shape7, { sub, allowFail: false }),
+      /output untrusted after timeout/,
+      sub,
+    );
+  }
+  // 목록 안은 같은 모양에서 성공 + lingering 1.
+  for (const sub of seal.GIT_EXIT_ONLY_SUBCOMMANDS) {
+    assert.equal(
+      seal.classifyGitResult(shape7, { sub, allowFail: false }).lingering,
+      1,
+      sub,
+    );
+  }
+});
+
+// ── I1~I7 실제 git · mkdtemp bare 원격 · 결과 모양만 덧입힘 ───────────────
+test("⒁ I1 push 가 status 0 + ETIMEDOUT -> sealed + lingering=1 · 다음 회차 unchanged · 원격 봉인 줄 정확히 +1", async () => {
+  const seal = await loadSeal();
+  await withWorldAsync(async (w) => {
+    const gitFn = overlayGitFn(seal, (s) => s === "push", asExitedButTimedOut);
+    const r1 = sealOnce(seal, w, T0, gitFn);
+    assert.equal(gitFn.hits, 1, "덧입힌 push 가 정확히 1 번 불렸다");
+    assert.equal(r1.status, "sealed");
+    assert.ok(r1.segment.startsWith("anchor-seal: sealed none="), r1.segment);
+    assert.ok(r1.segment.endsWith(" lingering=1"), r1.segment);
+    assert.equal(remoteSealLines(w).length, 1);
+    const r2 = sealOnce(seal, w, T0 + MIN);
+    assert.equal(r2.status, "unchanged");
+    assert.equal(remoteSealLines(w).length, 1, "봉인 줄 중복 0");
+    assert.equal(remoteCommitCount(w), 1);
+  });
+});
+
+test("⒁ I2 ls-remote 가 status 0 + ETIMEDOUT -> FAILED(출력 불신) · push 전이라 다음 회차 sealed · 원격 줄 1", async () => {
+  const seal = await loadSeal();
+  await withWorldAsync(async (w) => {
+    const gitFn = overlayGitFn(
+      seal,
+      (s) => s === "ls-remote",
+      asExitedButTimedOut,
+    );
+    const err = sealFailure(seal, w, T0, gitFn);
+    assert.equal(gitFn.hits, 1);
+    assert.match(err.message, /git ls-remote output untrusted after timeout/);
+    assert.equal(err.consecutiveFailures, 1);
+    assert.equal(remoteSealLines(w).length, 0, "push 전이라 원격 줄 0");
+    const r2 = sealOnce(seal, w, T0 + MIN);
+    assert.equal(r2.status, "sealed");
+    assert.equal(remoteSealLines(w).length, 1);
+  });
+});
+
+test("⒁ I3 fetch 가 status 0 + ETIMEDOUT -> 회차가 이어져 sealed + lingering=1 · 평소 회차의 구간에는 lingering 이 없다", async () => {
+  const seal = await loadSeal();
+  await withWorldAsync(async (w) => {
+    const r1 = sealOnce(seal, w, T0);
+    assert.equal(r1.status, "sealed");
+    assert.ok(!r1.segment.includes("lingering"), r1.segment);
+    fs.appendFileSync(w.northStarFile, "changed\n");
+    const gitFn = overlayGitFn(seal, (s) => s === "fetch", asExitedButTimedOut);
+    const r2 = sealOnce(seal, w, T0 + MIN, gitFn);
+    assert.equal(gitFn.hits, 1, "원격 끝이 있어 fetch 가 불렸다");
+    assert.equal(r2.status, "sealed");
+    assert.ok(r2.segment.endsWith(" lingering=1"), r2.segment);
+    assert.equal(remoteSealLines(w).length, 2);
+  });
+});
+
+test("⒁ I4 rev-parse HEAD 가 status 0 + ETIMEDOUT -> FAILED(출력 불신) · push 전이라 다음 회차 sealed · 원격 줄 1", async () => {
+  const seal = await loadSeal();
+  await withWorldAsync(async (w) => {
+    const gitFn = overlayGitFn(
+      seal,
+      (s, args) => s === "rev-parse" && args.includes("HEAD"),
+      asExitedButTimedOut,
+    );
+    const err = sealFailure(seal, w, T0, gitFn);
+    assert.equal(gitFn.hits, 1);
+    assert.match(err.message, /git rev-parse output untrusted after timeout/);
+    assert.equal(remoteSealLines(w).length, 0);
+    const r2 = sealOnce(seal, w, T0 + MIN);
+    assert.equal(r2.status, "sealed");
+    assert.equal(remoteSealLines(w).length, 1);
+  });
+});
+
+test("⒁ I5 KNOWN GAP -- push 를 실제로 한 뒤 status null + ETIMEDOUT -> FAILED · 다음 회차는 같은 뿌리 줄을 하나 더 쓴다(원격 줄 2 · 알려진 중복)", async () => {
+  const seal = await loadSeal();
+  await withWorldAsync(async (w) => {
+    const gitFn = overlayGitFn(seal, (s) => s === "push", asKilledAndTimedOut);
+    const err = sealFailure(seal, w, T0, gitFn);
+    assert.equal(gitFn.hits, 1);
+    assert.match(err.message, /git push timeout: ETIMEDOUT/);
+    assert.equal(remoteSealLines(w).length, 1, "push 는 실제로 올라갔다");
+    const r2 = sealOnce(seal, w, T0 + MIN);
+    assert.equal(r2.status, "sealed");
+    const lines = remoteSealLines(w);
+    assert.equal(lines.length, 2, "알려진 구멍: 같은 뿌리 줄이 하나 더");
+    assert.deepEqual(JSON.parse(lines[0]).roots, JSON.parse(lines[1]).roots);
+  });
+});
+
+test("⒁ I6 init 이 status 0 + ETIMEDOUT -> 분류기를 지나 회차가 이어져 sealed + lingering=1(init 도 같은 분류기)", async () => {
+  const seal = await loadSeal();
+  await withWorldAsync(async (w) => {
+    const gitFn = overlayGitFn(seal, (s) => s === "init", asExitedButTimedOut);
+    const r1 = sealOnce(seal, w, T0, gitFn);
+    assert.equal(gitFn.hits, 1, "전용 git 디렉터리가 없어 init 이 불렸다");
+    assert.equal(r1.status, "sealed");
+    assert.ok(r1.segment.endsWith(" lingering=1"), r1.segment);
+    assert.equal(remoteSealLines(w).length, 1);
+  });
+});
+
+test("⒁ I7 rev-parse --verify 가 status null(오류 없음) -> «가지 없음» 으로 읽지 않고 FAILED · 다음 회차 sealed", async () => {
+  const seal = await loadSeal();
+  await withWorldAsync(async (w) => {
+    const gitFn = overlayGitFn(
+      seal,
+      (s, args) => s === "rev-parse" && args.includes("--verify"),
+      asKilledNoError,
+    );
+    const err = sealFailure(seal, w, T0, gitFn);
+    assert.equal(gitFn.hits, 1);
+    assert.match(err.message, /git rev-parse killed/);
+    assert.equal(err.consecutiveFailures, 1);
+    assert.equal(remoteSealLines(w).length, 0);
+    const r2 = sealOnce(seal, w, T0 + MIN);
+    assert.equal(r2.status, "sealed");
+    assert.equal(remoteSealLines(w).length, 1);
+  });
+});
+
+// ── T3 env 운반 · T4 관계식 ───────────────────────────────────────────
+test("⒁ T3 env -- 망 3호출(ls-remote · fetch · push)의 env 에만 GIT_HTTP_LOW_SPEED_LIMIT=1000 · TIME=15 · 로컬 호출 env 는 수리 전과 같다 · -c 로는 안 싣는다", async () => {
+  const seal = await loadSeal();
+  await withWorldAsync(async (w) => {
+    const recorded = [];
+    const gitFn = (args, o) => {
+      recorded.push({
+        sub: gitSubOf(args),
+        args: [...args],
+        env: { ...o.env },
+      });
+      return seal.defaultGitFn(args, o);
+    };
+    lowSpeedKeysOff(() => {
+      // 로컬 호출 env 기대값 -- 손으로 만든 값(프로덕션 정리 함수를 쓰지 않는다).
+      const localEnv = { ...process.env };
+      for (const k of [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_PREFIX",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+      ]) {
+        delete localEnv[k];
+      }
+      localEnv.GIT_TERMINAL_PROMPT = "0";
+      sealOnce(seal, w, T0, gitFn);
+      fs.appendFileSync(w.northStarFile, "changed\n");
+      sealOnce(seal, w, T0 + MIN, gitFn);
+      const net = recorded.filter((c) =>
+        ["ls-remote", "fetch", "push"].includes(c.sub),
+      );
+      const local = recorded.filter((c) => !net.includes(c));
+      assert.deepEqual([...new Set(net.map((c) => c.sub))].sort(), [
+        "fetch",
+        "ls-remote",
+        "push",
+      ]);
+      assert.equal(net.length, 5, "첫 회차 2(ls-remote · push) + 둘째 회차 3");
+      assert.ok(local.length >= 14, `로컬 호출 ${local.length}`);
+      for (const c of net) {
+        assert.equal(c.env.GIT_HTTP_LOW_SPEED_LIMIT, "1000", c.sub);
+        assert.equal(c.env.GIT_HTTP_LOW_SPEED_TIME, "15", c.sub);
+        assert.equal(c.env.GIT_BOT_PAT, FAKE_PAT, c.sub);
+        const rest = { ...c.env };
+        for (const k of [
+          "GIT_HTTP_LOW_SPEED_LIMIT",
+          "GIT_HTTP_LOW_SPEED_TIME",
+          "GIT_BOT_PAT",
+          "GIT_BOT_USER",
+        ]) {
+          delete rest[k];
+        }
+        assert.deepEqual(rest, localEnv, `${c.sub}: 두 키 밖의 env 는 그대로`);
+      }
+      for (const c of local) {
+        const rest = { ...c.env };
+        delete rest.GIT_AUTHOR_DATE;
+        delete rest.GIT_COMMITTER_DATE;
+        assert.deepEqual(rest, localEnv, `${c.sub}: 로컬 호출 env 무변`);
+        assert.ok(!("GIT_HTTP_LOW_SPEED_LIMIT" in c.env), c.sub);
+        assert.ok(!("GIT_HTTP_LOW_SPEED_TIME" in c.env), c.sub);
+      }
+      for (const c of recorded) {
+        assert.ok(
+          !c.args.some((a) => /lowSpeed/i.test(String(a))),
+          `${c.sub}: -c 운반 금지`,
+        );
+      }
+    });
+  });
+});
+
+test("⒁ T4 관계 -- 저속 한도 시간 × 1000 × 2 <= 호출 한도(두 상수에서 계산) · 값 고정 1000 B/s · 15 초", async () => {
+  const seal = await loadSeal();
+  assert.equal(seal.GIT_HTTP_LOW_SPEED_LIMIT_BPS, 1000);
+  assert.equal(seal.GIT_HTTP_LOW_SPEED_TIME_S, 15);
+  assert.ok(
+    seal.GIT_HTTP_LOW_SPEED_TIME_S * 1000 * 2 <= seal.GIT_CALL_TIMEOUT_MS,
+    `${seal.GIT_HTTP_LOW_SPEED_TIME_S} s × 2 가 호출 한도 ${seal.GIT_CALL_TIMEOUT_MS} ms 를 넘는다`,
+  );
+});
+
+// ── R1 실물 모양 · R2 멎은 서버 ───────────────────────────────────────
+test(
+  "⒁ R1 실물 모양 -- 실제 defaultGitFn + 별칭 `!node gc & exit 0`: git 은 0 으로 끝났는데 status 0 + ETIMEDOUT · 걸린 시간 ≥ 한도 · 손자를 치운 뒤 남는 프로세스 0",
+  {
+    timeout: 120_000,
+  },
+  async (t) => {
+    const seal = await loadSeal();
+    const dir = fs.mkdtempSync(join(os.tmpdir(), "hyk255r1-"));
+    const pidFile = join(dir, "gc.pid");
+    const gcFile = join(dir, "gc.cjs");
+    // 손자: 자기 pid 를 적고 상속받은 stdout 을 쥔 채 90 초 뒤 스스로 끝난다(시험이 먼저 치운다).
+    fs.writeFileSync(
+      gcFile,
+      [
+        'const fs = require("node:fs");',
+        "fs.writeFileSync(process.argv[2], String(process.pid));",
+        'process.stdout.write("gc-start\\n");',
+        "setTimeout(() => process.exit(0), 90000);",
+        "",
+      ].join("\n"),
+    );
+    const fwd = (p) => p.split("\\").join("/");
+    const gcCmd = `"${fwd(process.execPath)}" "${fwd(gcFile)}" "${fwd(pidFile)}"`;
+    let gcPid = null;
+    let gcGone = false;
+    try {
+      const t0 = process.hrtime.bigint();
+      const res = seal.defaultGitFn(
+        ["-c", `alias.zz=!${gcCmd} & exit 0`, "zz"],
+        {
+          cwd: dir,
+          env: {
+            ...process.env,
+            GIT_TERMINAL_PROMPT: "0",
+            GIT_CONFIG_NOSYSTEM: "1",
+          },
+        },
+      );
+      const elapsedMs = Number(process.hrtime.bigint() - t0) / 1e6;
+      gcPid = Number(fs.readFileSync(pidFile, "utf8"));
+      const observed = { status: res.status, code: res.error?.code, elapsedMs };
+      t.diagnostic(`R1 ${JSON.stringify({ ...observed, gcPid })}`);
+      assert.equal(res.status, 0, JSON.stringify(observed));
+      assert.equal(res.error?.code, "ETIMEDOUT", JSON.stringify(observed));
+      assert.ok(
+        elapsedMs >= seal.GIT_CALL_TIMEOUT_MS - 100,
+        `걸린 시간 ${elapsedMs} ms 가 한도 ${seal.GIT_CALL_TIMEOUT_MS} ms 보다 짧다`,
+      );
+      assert.ok(Number.isInteger(gcPid) && gcPid > 0, "손자 pid 가 기록됐다");
+      assert.ok(isPidAlive(gcPid), "치우기 전에는 손자가 관을 쥔 채 살아 있다");
+      // 실물 모양이 분류기에서 «성공 + lingering» 으로 읽힌다(종료 코드 전용 호출일 때).
+      assert.equal(
+        seal.classifyGitResult(res, { sub: "push", allowFail: false })
+          .lingering,
+        1,
+      );
+    } finally {
+      if (gcPid === null) {
+        try {
+          gcPid = Number(fs.readFileSync(pidFile, "utf8"));
+        } catch {
+          gcPid = null;
+        }
+      }
+      if (gcPid) {
+        try {
+          process.kill(gcPid);
+        } catch {
+          // 이미 끝났다.
+        }
+        gcGone = waitPidGone(gcPid, 10_000);
+      }
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch {
+        // 임시 폴더 정리 실패는 시험 결과가 아니다.
+      }
+    }
+    assert.ok(gcPid, "손자 pid 를 얻지 못했다");
+    assert.ok(gcGone, `손자 pid ${gcPid} 가 아직 살아 있다`);
+  },
+);
+
+const R2_SERVER_SRC = [
+  'const net = require("node:net");',
+  'const fs = require("node:fs");',
+  "const log = process.argv[2];",
+  "const server = net.createServer((sock) => {",
+  '  fs.appendFileSync(log, "open " + Date.now() + "\\n");',
+  '  sock.on("data", () => {});',
+  '  sock.on("error", () => {});',
+  '  sock.on("close", () => fs.appendFileSync(log, "close " + Date.now() + "\\n"));',
+  "});",
+  'server.listen(0, "127.0.0.1", () => {',
+  '  process.stdout.write("port " + server.address().port + "\\n");',
+  "});",
+  'process.stdin.on("end", () => process.exit(0));',
+  "process.stdin.resume();",
+  "setTimeout(() => process.exit(0), 150000);",
+  "",
+].join("\n");
+
+function r2DriverSource(sealUrl, params) {
+  return [
+    `import { runAnchorSealOnce } from ${JSON.stringify(sealUrl)};`,
+    `const params = ${JSON.stringify(params)};`,
+    "const t0 = process.hrtime.bigint();",
+    "let out;",
+    "try {",
+    "  const r = runAnchorSealOnce(params);",
+    "  out = { threw: null, status: r.status };",
+    "} catch (err) {",
+    "  out = { threw: String(err && err.message) };",
+    "}",
+    "out.elapsedMs = Number(process.hrtime.bigint() - t0) / 1e6;",
+    'process.stdout.write("R2-RESULT " + JSON.stringify(out) + "\\n");',
+    "",
+  ].join("\n");
+}
+
+function readServerPort(server) {
+  return new Promise((resolve, reject) => {
+    let buf = "";
+    const timer = setTimeout(
+      () => reject(new Error("R2 서버가 포트를 알리지 않았다")),
+      10_000,
+    );
+    server.stdout.on("data", (d) => {
+      buf += String(d);
+      const m = /port (\d+)/.exec(buf);
+      if (m) {
+        clearTimeout(timer);
+        resolve(Number(m[1]));
+      }
+    });
+    server.on("exit", () => reject(new Error("R2 서버가 먼저 종료됐다")));
+  });
+}
+
+// 드라이버(자식 node) env -- 프록시 제거 · 루프백은 프록시 제외 · 시스템/전역 git 설정 무시 ·
+// 저속 한도 env 는 «프로덕션 run 이 싣는 것만» 쓰도록 물려받은 값을 지운다(TZ 는 물려받는다).
+function r2DriverEnv(emptyGlobal) {
+  const env = { ...process.env };
+  for (const k of Object.keys(env)) {
+    if (/^(https?|all)_proxy$/i.test(k)) delete env[k];
+  }
+  env.NO_PROXY = "127.0.0.1";
+  env.no_proxy = "127.0.0.1";
+  env.GIT_CONFIG_NOSYSTEM = "1";
+  env.GIT_CONFIG_GLOBAL = emptyGlobal;
+  delete env.GIT_HTTP_LOW_SPEED_LIMIT;
+  delete env.GIT_HTTP_LOW_SPEED_TIME;
+  return env;
+}
+
+// 서버 자식 정리 -- 종료 이벤트와 pid 소멸을 «관측» 해 돌려준다.
+async function stopR2Server(server, serverExit) {
+  server.stdin.end();
+  server.kill();
+  const exitInfo = await Promise.race([
+    serverExit,
+    new Promise((resolve) => setTimeout(() => resolve(null), 10_000)),
+  ]);
+  server.stdout.destroy();
+  return { exitInfo, gone: waitPidGone(server.pid, 5_000) };
+}
+
+function parseServerLog(file) {
+  const text = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
+  const rows = text
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => l.split(" "));
+  return {
+    opens: rows.filter((r) => r[0] === "open").map((r) => Number(r[1])),
+    closes: rows.filter((r) => r[0] === "close").map((r) => Number(r[1])),
+  };
+}
+
+test(
+  "⒁ R2 멎은 서버 -- 127.0.0.1 에서 받고 아무것도 안 보내는 서버 · 진짜 git 이 저속 한도로 스스로 끝난다: `git ls-remote exit <n>` · 걸린 시간 < 30 s · 서버가 연결 close 를 기록(망을 쥔 프로세스 종료) · 서버 자식 종료",
+  {
+    timeout: 180_000,
+  },
+  async (t) => {
+    const seal = await loadSeal();
+    const dir = fs.mkdtempSync(join(os.tmpdir(), "hyk255r2-"));
+    const serverLog = join(dir, "server.log");
+    const serverFile = join(dir, "server.cjs");
+    const driverFile = join(dir, "driver.mjs");
+    const patFile = join(dir, "fake-bot-pat.txt");
+    const emptyGlobal = join(dir, "empty-gitconfig");
+    const northStar = join(dir, "north-star.md");
+    fs.writeFileSync(serverFile, R2_SERVER_SRC);
+    fs.writeFileSync(patFile, `${FAKE_PAT}\n`);
+    fs.writeFileSync(emptyGlobal, "");
+    fs.writeFileSync(northStar, "r2 north star\n");
+    const server = spawn(process.execPath, [serverFile, serverLog], {
+      stdio: ["pipe", "pipe", "inherit"],
+      windowsHide: true,
+    });
+    const serverExit = new Promise((resolve) => {
+      server.on("exit", (code, signal) => resolve({ code, signal }));
+    });
+    let stopped;
+    try {
+      const port = await readServerPort(server);
+      fs.writeFileSync(
+        driverFile,
+        r2DriverSource(new URL("./anchor-seal.mjs", import.meta.url).href, {
+          remote: `http://127.0.0.1:${port}/x.git`,
+          patFile,
+          sealDir: join(dir, "seal-git"),
+          watchDir: join(dir, "watch"),
+          repoRoot: join(dir, "synthetic-repo"),
+          now: T0,
+          sources: { northStarFile: northStar },
+        }),
+      );
+      const child = spawnSync(process.execPath, [driverFile], {
+        encoding: "utf8",
+        windowsHide: true,
+        env: r2DriverEnv(emptyGlobal),
+        timeout: 90_000,
+      });
+      const m = /R2-RESULT (.*)/.exec(child.stdout ?? "");
+      assert.ok(m, `드라이버 출력 없음: ${child.stdout} ${child.stderr}`);
+      const result = JSON.parse(m[1]);
+      // 서버가 연결 close 를 적을 시간(드라이버 종료 직후)을 잠깐 준다.
+      let log = parseServerLog(serverLog);
+      for (let i = 0; i < 50 && log.closes.length < log.opens.length; i += 1) {
+        sleepMs(100);
+        log = parseServerLog(serverLog);
+      }
+      const label = JSON.stringify({ result, log });
+      t.diagnostic(`R2 ${label}`);
+      assert.match(String(result.threw), /^git ls-remote exit \d+/, label);
+      assert.ok(
+        result.elapsedMs < seal.GIT_CALL_TIMEOUT_MS,
+        `걸린 시간 ${result.elapsedMs} ms 가 호출 한도 ${seal.GIT_CALL_TIMEOUT_MS} ms 이상이다 · ${label}`,
+      );
+      assert.ok(log.opens.length >= 1, `서버가 연결을 받지 못했다 · ${label}`);
+      assert.equal(
+        log.closes.length,
+        log.opens.length,
+        `닫히지 않은 연결이 남았다(고아) · ${label}`,
+      );
+    } finally {
+      stopped = await stopR2Server(server, serverExit);
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch {
+        // 임시 폴더 정리 실패는 시험 결과가 아니다.
+      }
+    }
+    assert.ok(stopped.exitInfo, "R2 서버 자식이 종료되지 않았다");
+    assert.ok(stopped.gone, "R2 서버 pid 가 살아 있다");
+  },
+);
