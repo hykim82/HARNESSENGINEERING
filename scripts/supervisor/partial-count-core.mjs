@@ -437,6 +437,35 @@ export function renderGate3RecordLines(g) {
   ];
 }
 
+// HYK-255-linear-binding-1 (전달 #20261123-1740 확정 4 · 판정 #20261123-2305) -- ㄱ-4 «Linear Done 결속 확인» 줄. 입력 = {status, result}:
+//   status = {on, reason} -- 감시 회차가 표지 판정 결과를 싣는다(매 회차 «켜짐/꺼짐 + 사유 토큰» 한 줄 · 꺼진 채 조용히 지나가지 않게).
+//   result = wire 의 collectLinearDoneBinding 결과 {known:true, …counts} | {known:false, reason} -- 켠 회차에만 있다.
+// 둘 다 없으면(옛 호출자 · 수동 CLI 인자 없음) 줄 0개. 결속 확인이지 독립 증거가 아니다(문면 고정) -- 커버리지 · 독립 확인 수 · ㄴ 분자에 어떤 값도 더하지 않는다
+// (이 함수는 커버리지 상수를 읽지 않는 순수 렌더 · 던지지 않고 아무것도 쓰지 않는다). 모르면(UNKNOWN) 0 으로 접지 않는다.
+const LINEAR_BINDING_LABEL = "- ㄱ-4 Linear Done 결속 확인";
+
+function renderLinearBindingResultLine(r) {
+  if (r.known !== true)
+    return `${LINEAR_BINDING_LABEL}: UNKNOWN(${r.reason ?? "사유 미상"}) — 0 아님`;
+  return (
+    `${LINEAR_BINDING_LABEL}(결속 확인 · 독립 아님): Done ${r.total}건 중 결속 ${r.bound}` +
+    ` · 미결속 ${r.unbound}(승인 아님 ${r.unboundNotApproved} · PR 연결 없음 ${r.unboundNoPr})` +
+    ` · 미조회 ${r.unchecked} · 행위자 = 기계 키 주인과 같은 계정 ${r.sameActor}/${r.total}` +
+    " — Linear 행위자는 근거가 아니다"
+  );
+}
+
+export function renderLinearDoneBindingLines(lb) {
+  if (!lb) return [];
+  const out = [];
+  if (lb.status)
+    out.push(
+      `${LINEAR_BINDING_LABEL} ${lb.status.on === true ? "켜짐" : "꺼짐"}(${lb.status.reason})`,
+    );
+  if (lb.result) out.push(renderLinearBindingResultLine(lb.result));
+  return out;
+}
+
 // HYK-255-g-aux-render-1 커밋 2 (D3 ⑵) -- ㄱ-4 «UNDECIDABLE N» 에 사유 분포를
 // 붙인다: «UNDECIDABLE 2(사유: HTTP_FAILED 1 · RATE_LIMITED 1)». 사유는 wire 가
 // 이미 받은 판정(gate4.undecidableReasons = {사유 코드: 건수})에서 전달한다 --
@@ -486,7 +515,9 @@ function buildGate4CacheLines(gate4) {
   return lines;
 }
 
-function buildGaSection(gate4, auxNote, gateAux, gate3Record) {
+// gateExtras = {gate3Record, linearBinding} -- 둘 다 «별개 입력»(커버리지 · 확인 수에 더하지 않는다 · 없으면 줄 0개).
+function buildGaSection(gate4, auxNote, gateAux, gateExtras = {}) {
+  const { gate3Record, linearBinding } = gateExtras;
   const lines = ["ㄱ 설계된 정지:"];
   if (gate4.known === true) {
     lines.push(
@@ -509,6 +540,8 @@ function buildGaSection(gate4, auxNote, gateAux, gate3Record) {
   }
   // HYK-255-g3-record-1 -- ㄱ-3 GitHub 기록(별도 줄 · G4 ⓐ): 입력이 없으면 줄 0개 · 커버리지 두 줄은 아래에서 그대로.
   lines.push(...renderGate3RecordLines(gate3Record));
+  // HYK-255-linear-binding-1 -- Linear Done 결속 확인(ㄱ-3 줄 뒤 · 보조 관측 앞 · 커버리지 두 줄 무변): 입력이 없으면 줄 0개.
+  lines.push(...renderLinearDoneBindingLines(linearBinding));
   lines.push(`- ORCH-writeable 보조 관측: ${auxNote} — 독립 계수에 미산입`);
   const gateAuxLine = renderGateAuxObservationLine(gateAux);
   if (gateAuxLine) lines.push(gateAuxLine);
@@ -824,6 +857,8 @@ export function buildPartialCountReport({
   // HYK-255-g3-record-1 -- 기본값 undefined -> ㄱ 절 새 줄 0개(미결선 호출자 회귀 0). 값 = wire 의 collectGate3Record 결과(독립 확인 · 미조회 · UNKNOWN).
   // 커버리지 상수 · ㄱ-4 확인 수와 «별개 입력» -- 둘 어디에도 더하지 않는다.
   gate3Record,
+  // HYK-255-linear-binding-1 -- ㄱ 절 «Linear Done 결속 확인» 입력 {status, result}(기본 undefined = 새 줄 0개 · 커버리지 · 확인 수 · ㄴ 분자에 더하지 않는다).
+  linearBinding,
 }) {
   const lines = [];
   lines.push("집계 성격: PARTIAL — 전수 아님");
@@ -857,7 +892,10 @@ export function buildPartialCountReport({
   );
   lines.push("");
   lines.push(
-    ...buildGaSection(gate4, auxNote, gateAuxObservation, gate3Record),
+    ...buildGaSection(gate4, auxNote, gateAuxObservation, {
+      gate3Record,
+      linearBinding,
+    }),
   );
   lines.push("");
   lines.push(

@@ -63,6 +63,7 @@ import {
   APPROVAL_STATUS,
   APPROVAL_REASON,
 } from "./approval-authority-adapter.mjs";
+import { collectLinearDoneBinding } from "./linear-done-binding.mjs";
 import {
   loadEngineProfiles,
   getKnownEngines,
@@ -951,6 +952,8 @@ function tallyApprovalVerdicts({ candidates, fresh, entries }) {
     reusedUndecidable: 0,
     openPrNotReused: 0,
     reasonVerdicts: [],
+    // HYK-255-linear-binding-1 -- 후보 sha 별 판정 상태(이번 회차 판정 + 캐시 재사용분 · 못 본 후보는 없음). Linear 결속 확인(S3)이 읽기만 한다 -- 추가 REST 0.
+    shaStatuses: [],
   };
   for (const c of candidates) {
     const picked = pickCandidateVerdict({ sha: c.sha, fresh, entries });
@@ -968,6 +971,7 @@ function tallyUnchecked(t, entry) {
 
 function tallyPickedVerdict(t, sha, { verdict, fromCache }) {
   const reused = fromCache ? 1 : 0;
+  t.shaStatuses.push({ sha, status: verdict.status });
   if (verdict.status === APPROVAL_STATUS.APPROVED) {
     t.approved += 1;
     t.reusedApproved += reused;
@@ -1143,6 +1147,7 @@ export async function collectGate4Independent({
     undecidable: t.undecidable,
     uncheckedByBudget: t.unchecked,
     approvedEvents: t.approvedEvents,
+    shaStatuses: t.shaStatuses,
     verdicts,
     undecidableReasons: summarizeUndecidableReasons(t.reasonVerdicts),
   };
@@ -3865,6 +3870,7 @@ function buildCollectors({
   permissionResult,
   githubHumanActions,
   gate3Record,
+  linearBinding,
 }) {
   const collectors = [];
   collectors.push({
@@ -3900,9 +3906,29 @@ function buildCollectors({
   if (permissionEntry) collectors.push(permissionEntry);
   const githubEntry = buildGithubHumanCollectorEntry(githubHumanActions);
   if (githubEntry) collectors.push(githubEntry);
-  const gate3Entry = buildGate3RecordCollectorEntry(gate3Record);
-  if (gate3Entry) collectors.push(gate3Entry);
+  // 꼬리 둘(ㄱ-3 기록 · Linear 결속)은 선택 행 -- 없으면(null) 행 0개.
+  collectors.push(
+    ...[
+      buildGate3RecordCollectorEntry(gate3Record),
+      buildLinearBindingCollectorEntry(linearBinding),
+    ].filter(Boolean),
+  );
   return collectors;
+}
+
+// HYK-255-linear-binding-1 -- «Linear결속수집기» 진단 줄(관측 건강). ⛔ok 는 «항상 true» -- 일별 끊김 사유(failedCollectorNames -> collectorFails)에 이 수집기 실패가 들어가면
+// «Linear 가 안 되는 날 = 차단» 이 된다(확정 4 · 변이 M13). 수집 안 한 회차(null · 꺼짐 상태만)는 행 0개 · 실패 · 모름은 detail 문면으로만 드러낸다.
+function buildLinearBindingCollectorEntry(lb) {
+  const r = lb?.result;
+  if (!r) return null;
+  const name = "Linear결속수집기";
+  if (r.known === true)
+    return { name, ok: true, detail: `Done ${r.total} · 결속 ${r.bound}` };
+  return {
+    name,
+    ok: true,
+    detail: `수집 실패(일별 끊김 사유 아님 · 0 아님): ${r.reason}`,
+  };
 }
 
 // HYK-255-g3-record-1 -- «ㄱ-3기록수집기» 진단 줄(관측 건강). ⛔ok 는 «항상 true» -- 일별 끊김 사유(failedCollectorNames -> collectorFails)에
@@ -4098,6 +4124,8 @@ function resolveValueOptions(options) {
       approvalCachePath: resolveApprovalCachePath(options),
       gate3RecordBase: options.gate3RecordBase,
       relayGlob: options.relayGlob,
+      // HYK-255-linear-binding-1 -- Linear Done 결속 확인(S3) 옵션 묶음(opt-in · linearBinding 도 상태도 없으면 null).
+      linearBinding: resolveLinearBindingOptions(options),
     },
     maxExternalEvidenceChecks:
       options.maxExternalEvidenceChecks ?? DEFAULT_MAX_EXTERNAL_EVIDENCE_CHECKS,
@@ -4138,6 +4166,20 @@ function resolveAuxDirOptions(options) {
       options.githubBotAccountsPath ?? DEFAULT_GITHUB_BOT_ACCOUNTS_PATH,
     // HYK-255-p2a-scope-1 -- 기계 계수 범위 기준 설정 파일 경로(기본 = 저장소 설정 파일 · 시험 주입용 옵션 · 새 CLI 인자 아님).
     machineScopePath: options.machineScopePath ?? DEFAULT_MACHINE_SCOPE_PATH,
+  };
+}
+
+// HYK-255-linear-binding-1 -- 켬 = options.linearBinding === true(보고 CLI --linear-binding on · 감시 회차의 표지/인자 판정) · 상태 = options.linearBindingStatus({on, reason} · 감시 회차만).
+// 둘 다 없으면 null -- 새 줄 0개 · Linear 호출 0 · 키 읽기 0. env · linearFetch 는 시험 주입구(기본 = 실제 process.env · 전역 fetch 는 포트가 정한다).
+function resolveLinearBindingOptions(options) {
+  const enabled = options.linearBinding === true;
+  const status = options.linearBindingStatus ?? null;
+  if (!enabled && !status) return null;
+  return {
+    enabled,
+    status,
+    env: options.env ?? process.env,
+    linearFetch: options.linearFetch,
   };
 }
 
@@ -4248,13 +4290,21 @@ function assemblePartialCountReportText({
   // HYK-255-p2b-qual-1 -- 같은 결과 묶음이 «1-C 판정 자격» 줄(부분 있음일 때만) · 종류 설정 진단 줄(읽기 실패일 때만)도 싣는다(없으면 지금 문면 그대로).
   machineScope = {},
 }) {
-  const { outboxResult, relayResult, gateAux, permissionResult, gate3Record } =
-    aux;
+  const {
+    outboxResult,
+    relayResult,
+    gateAux,
+    permissionResult,
+    gate3Record,
+    linearBinding,
+  } = aux;
   return buildPartialCountReport({
     permissionAnswers: permissionResult ?? undefined,
     githubHumanActions,
     // HYK-255-g3-record-1 -- ㄱ-3 GitHub 기록(aux 묶음 안 · 없으면 undefined = 새 줄 0개).
     gate3Record: gate3Record ?? undefined,
+    // HYK-255-linear-binding-1 -- Linear Done 결속 확인(aux 묶음 안 · 없으면 undefined = 새 줄 0개 · 커버리지 · 확인 수 무관).
+    linearBinding: linearBinding ?? undefined,
     confirmedZeroStreakLine,
     machineScopeLine: machineScope.machineScopeLine,
     qualificationLine: machineScope.qualificationLine,
@@ -4288,6 +4338,7 @@ function assemblePartialCountReportText({
       permissionResult,
       githubHumanActions,
       gate3Record,
+      linearBinding,
     }),
     lastAliveMs: watch.lastAliveMs,
     coverageGaps: watch.coverageGaps,
@@ -4393,7 +4444,41 @@ async function collectPartialCountInputs({
     readFn,
     readdirFn,
   });
-  return { deliveredResult, consumedResult, watch, ...rest };
+  const linearBinding = await resolveLinearBinding({
+    linearOptions: gate4Options.linearBinding,
+    repoRoot,
+    git,
+    windowStartMs,
+    windowEndMs,
+    gate4: rest.gate4,
+  });
+  return { deliveredResult, consumedResult, watch, ...rest, linearBinding };
+}
+
+// HYK-255-linear-binding-1 (판정 #20261123-2305) -- Linear Done 결속 확인(S3) 한 회차 · ㄱ-4 판정(gate4)이 놓인 «뒤» 에 부른다(읽기만 · GitHub REST 0 · 회차 천장 무관).
+//   linearOptions = {enabled, status, env, linearFetch}. 켜지지 않았고 상태도 없으면 null(줄 0개 · Linear 호출 0 · 키 읽기 0 -- 옛 호출자 회귀 0).
+//   상태만 있으면(꺼진 감시 회차) {status} 만 -- 수집 0. 켜졌으면 수집 결과를 {status, result} 로. 던지지 않는다(차단 0 · 실패는 UNKNOWN 한 줄).
+async function resolveLinearBinding({
+  linearOptions,
+  repoRoot,
+  git,
+  windowStartMs,
+  windowEndMs,
+  gate4,
+}) {
+  if (!linearOptions) return null;
+  const { enabled, status, env, linearFetch } = linearOptions;
+  if (enabled !== true) return status ? { status, result: null } : null;
+  const result = await collectLinearDoneBinding({
+    repoRoot,
+    env,
+    linearFetch,
+    git,
+    windowStartMs,
+    windowEndMs,
+    gate4,
+  });
+  return { status: status ?? null, result };
 }
 
 // GitHub REST 를 부르는 수집 셋(ㄱ-4 · D1 · P3) -- collectPartialCountInputs 에서 떼어낸 것(eslint max-lines-per-function 예산).
@@ -4605,7 +4690,7 @@ export async function runPartialCountOnce(options = {}) {
     windowEndMs,
     ...inputs,
     // HYK-255-g3-record-1 -- ㄱ-3 기록 결과는 보조 묶음(aux)에 실어 조립으로 넘긴다(opt-in 아니면 null).
-    aux: { ...aux, gate3Record: inputs.gate3Record },
+    aux: withGateExtras(aux, inputs),
     confirmedZeroStreakLine: options.confirmedZeroStreakLine,
     machineScope: await resolveMachineScope({
       dailyLines: options.machineScopeDailyLines,
@@ -4615,6 +4700,15 @@ export async function runPartialCountOnce(options = {}) {
       nowMs: now,
     }),
   });
+}
+
+// HYK-255-linear-binding-1 -- 보조 묶음(aux)에 ㄱ-3 기록(B1) · Linear 결속 확인(B2) 결과를 싣는다(opt-in 이 아니면 null · runPartialCountOnce 줄 수 예산 때문에 떼어냈다).
+function withGateExtras(aux, inputs) {
+  return {
+    ...aux,
+    gate3Record: inputs.gate3Record,
+    linearBinding: inputs.linearBinding,
+  };
 }
 
 // 보고문 조립 + 결과 모양 -- runPartialCountOnce 에서 떼어낸 것(eslint max-lines-per-function 예산,
@@ -4727,6 +4821,10 @@ const CLI_FLAG_HANDLERS = Object.freeze({
   // HYK-255-g3-record-1 -- ㄱ-3 GitHub 기록 수집(S4)의 기록 가지 이름(보통 gate3-record). 기본값 없음(opt-in) -- 생략하면 수집기를 부르지 않는다(회귀 0).
   "--gate3-record-base": (opts, v) => {
     opts.gate3RecordBase = v;
+  },
+  // HYK-255-linear-binding-1 -- Linear Done 결속 확인(S3) 수동 켜기: «on» 일 때만 켠다(그 밖 값 = false). 인자가 없으면 키 자체가 없다(옛 호출자 회귀 0 · 새 줄 0개).
+  "--linear-binding": (opts, v) => {
+    opts.linearBinding = v === "on";
   },
 });
 

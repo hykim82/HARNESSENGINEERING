@@ -340,6 +340,8 @@ test("runWatchCliPartialCountStep: argv의 --relay-glob/--inbox-dir이 실제로
     outboxDir: null,
     relayGlob: "D:/문서관리/통역/기록/전달-*.md",
     inboxDir: "D:/문서관리/통역/받는함",
+    // HYK-255-linear-binding-1 -- 감시 회차는 매 회차 Linear 결속 확인 켜짐/꺼짐 상태를 싣는다(표지 파일 없음 = 꺼짐 · 사유 ABSENT). 이 줄 1개 추가가 유일한 뜻 변화다(나머지 키 · 값 무변).
+    linearBindingStatus: { on: false, reason: "LINEAR_BINDING_FLAG_ABSENT" },
   });
 });
 
