@@ -779,7 +779,7 @@ test("T-F 설정 3행(예방 1 · 부분 1 · 정의상 제외 1): 선언문 절
   const defAt = lines.findIndex((l) => l.startsWith("- 정의상 개입이 아닌 것"));
   const proofAt = lines.findIndex((l) => l.startsWith("- 예방 증명이 선 종류"));
   assert.ok(outAt !== -1 && defAt > outAt && proofAt > defAt, "세 칸 순서");
-  assert.ok(lines[outAt].includes("1개"), lines[outAt]);
+  assert.ok(lines[outAt].includes("알려진 종류 1개는"), lines[outAt]);
   assert.ok(lines[outAt].includes("하한"), "열린 집합 낱말");
   assert.ok(
     lines[outAt].includes("(위 1개는 하한)"),
