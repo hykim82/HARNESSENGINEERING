@@ -18,7 +18,8 @@ const NOW = Date.parse("2026-11-15T15:00:00+09:00");
 const SCOPE_CONFIG_PATH = "scripts/supervisor/partial-count-machine-scope.json";
 const KINDS_CONFIG_PATH =
   "scripts/supervisor/partial-count-uncountable-kinds.json";
-const KINDS_SCHEMA = "partial-count-uncountable-kinds/v1";
+// HYK-255-skipday-scope-1 바뀐 문면(뜻 무변): 종류 설정 스키마 v1 -> v2(plain 필수) · 처리 값 excluded-by-definition-provisional -> excluded-by-definition · 자격 줄 «연속 N일» -> «일한 날 N일» · «정의상 제외(잠정)» -> «정의상 제외».
+const KINDS_SCHEMA = "partial-count-uncountable-kinds/v2";
 const QUAL_PREFIX = "1-C 판정 자격: ";
 const DIAG_PREFIX = "종류 설정 진단: ";
 const SCOPE_PREFIX = "기계 계수 범위 기준: ";
@@ -50,6 +51,9 @@ const SCOPE_CFG = {
   minDeliveredPerDay: 3,
   lastTickCutoffKst: "23:15",
   criterionChangedOn: "2026-11-01",
+  // 설정 v3 -- 이 파일의 합성 설정은 break(건너뜀 이전 동작 · 자격 줄 모양 무변 · 건너뜀 쪽 시험은 partial-count-skipday.test.mjs).
+  lowDayHandling: "break",
+  lowDayHandlingChangedOn: "2026-11-10",
 };
 
 // ---- 합성 일별 줄 · 합성 저장소 ---------------------------------------------------------------------------------------
@@ -97,7 +101,7 @@ function git(cwd, args) {
 
 const scopeJson = (over = {}) =>
   JSON.stringify({
-    schema_version: "partial-count-machine-scope/v2",
+    schema_version: "partial-count-machine-scope/v3",
     ...SCOPE_CFG,
     ...over,
   });
@@ -127,6 +131,10 @@ function buildRepo(
 const kindRow = (i, handling, extra = {}) => ({
   id: `k${String(i).padStart(2, "0")}`,
   name: `합성 종류 ${i}`,
+  plain: `합성 쉬운 말 ${i}`,
+  ...(handling === "excluded-by-definition"
+    ? { plainLimit: `합성 한계 ${i}` }
+    : {}),
   handling,
   source: `synthetic:${i}`,
   ...extra,
@@ -139,7 +147,7 @@ const rowsOf = (partial, excluded = 0, proof = 0) => [
   ),
   ...Array.from({ length: partial }, (_, i) => kindRow(i + 1, "partial-scope")),
   ...Array.from({ length: excluded }, (_, i) =>
-    kindRow(200 + i, "excluded-by-definition-provisional"),
+    kindRow(200 + i, "excluded-by-definition"),
   ),
 ];
 const REAL_KINDS = fs.readFileSync(
@@ -165,14 +173,14 @@ const linesOf = (text) => text.split("\n");
 const qualOf = (text) => linesOf(text).find((l) => l.startsWith(QUAL_PREFIX));
 const diagOf = (text) => linesOf(text).find((l) => l.startsWith(DIAG_PREFIX));
 const kindsOf = (line) =>
-  /알려진 못 세는 종류 (\d+) = 예방 증명 (\d+) \/ 부분 범위 (\d+) \/ 정의상 제외\(잠정\) (\d+)/
+  /알려진 못 세는 종류 (\d+) = 예방 증명 (\d+) \/ 부분 범위 (\d+) \/ 정의상 제외 (\d+)/
     .exec(line)
     ?.slice(1)
     .map(Number);
 // 바뀐 단언(판정 #20261117-2026 ③ · 2104 ②): «동시 배달 최대 ≥ K» -> «배달(24시간 창) ≥ K건 · 기준 변경 <날짜>» -- [연속 일수, 기준 일수, 배달 문턱, 기준 변경일].
 const scopeOf = (line) => {
   const m =
-    /연속 (\d+)일 \/ 기준 (\d+)일 · 배달\(24시간 창\) ≥ (\d+)건 · 기준 변경 (\d{4}-\d{2}-\d{2})\)/.exec(
+    /일한 날 (\d+)일 \/ 기준 (\d+)일 · 배달\(24시간 창\) ≥ (\d+)건 · 기준 변경 (\d{4}-\d{2}-\d{2})\)/.exec(
       line,
     );
   return m ? [Number(m[1]), Number(m[2]), Number(m[3]), m[4]] : null;
@@ -180,7 +188,7 @@ const scopeOf = (line) => {
 
 // ---- ⑴ 기준 충족 + 종류 설정 읽기 성공 = 부분 있음 -----------------------------------------------------------------------
 
-test("기준 충족 + 설정 15행(실물 설정 파일): 자격 줄 = 부분 있음 · 알려진 못 세는 종류 15 = 예방 증명 0 / 부분 범위 14 / 정의상 제외(잠정) 1 · «ㄴ=0» 판정 아님", async () => {
+test("기준 충족 + 설정 15행(실물 설정 파일): 자격 줄 = 부분 있음 · 알려진 못 세는 종류 15 = 예방 증명 0 / 부분 범위 14 / 정의상 제외 1 · «ㄴ=0» 판정 아님", async () => {
   const { reportText } = await runReport(buildRepo(REAL_KINDS), {
     machineScopeDailyLines: MET_LINES,
   });
@@ -208,7 +216,7 @@ test("긍정 문면 금지: 부분 있음 줄에 «자격 있음» · «완료»
   }
 });
 
-test("N · D · C = P2a 기계 계수 범위 기준 줄의 값 그대로 -- 설정 3일/배달 1건 이면 줄도 3/1 · 연속 3일 · 기준 변경일도 설정 값 (코드 리터럴 0)", async () => {
+test("N · D · C = P2a 기계 계수 범위 기준 줄의 값 그대로 -- 설정 3일/배달 1건 이면 줄도 3/1 · 일한 날 3일 · 기준 변경일도 설정 값 (코드 리터럴 0)", async () => {
   // 합성 일별 줄 = 배달 1건뿐(합성 기본 문턱 미만) -- 완화한 설정(문턱 1)에서만 센 날이 된다.
   const lines = dayLines(-3, -1, () => ({ delivered: 1 }));
   const loose = await runReport(
@@ -227,7 +235,7 @@ test("N · D · C = P2a 기계 계수 범위 기준 줄의 값 그대로 -- 설�
     l.startsWith(SCOPE_PREFIX),
   );
   assert.match(scopeLine, /충족/);
-  assert.match(scopeLine, /연속 3일 \/ 기준 3일\(배달\(24시간 창\) ≥ 1건/);
+  assert.match(scopeLine, /일한 날 3일 \/ 기준 3일\(배달\(24시간 창\) ≥ 1건/);
   const strict = await runReport(buildRepo(REAL_KINDS), {
     machineScopeDailyLines: MET_LINES,
   });
@@ -243,7 +251,7 @@ test("a + b + c = K = 설정 종류 수 -- 설정 3행(예방 증명 1 · 부분
   const rows = [
     kindRow(1, "prevention-proof", { proofDevice: PROOF_DEVICE }),
     kindRow(2, "partial-scope"),
-    kindRow(3, "excluded-by-definition-provisional"),
+    kindRow(3, "excluded-by-definition"),
   ];
   const { reportText } = await runReport(
     buildRepo(kindsJson(rows), { files: [PROOF_DEVICE] }),
@@ -409,21 +417,33 @@ test("일별 줄 칸 · 결과 키 무변 + 자격 줄 · 진단 줄 말고는 �
     Object.keys(without).sort(),
     "결과 키 무변",
   );
+  // HYK-255-skipday-scope-1 바뀐 단언(뜻 무변 · 예외 한 칸 추가): 「자격 줄 · 진단 줄 말고는 바이트 무변」 에 «선언문 범위 시안» 절(부분 있음 회차에만 보고서 꼬리 앞에 붙는 새 절)이 예외로 더해진다 --
+  // 절은 «첫 줄 ~ 그 뒤 첫 빈 줄» 까지를 떼고 나머지는 그대로 비교한다.
+  const dropDeclaration = (lines) => {
+    const at = lines.findIndex((l) => l.startsWith("선언문 범위 시안"));
+    if (at === -1) return lines;
+    return [...lines.slice(0, at), ...lines.slice(lines.indexOf("", at) + 1)];
+  };
   const strip = (text) =>
-    linesOf(text)
+    dropDeclaration(linesOf(text))
       .filter((l) => !l.startsWith(QUAL_PREFIX) && !l.startsWith(DIAG_PREFIX))
       .join("\n");
   assert.equal(strip(withKinds.reportText), strip(without.reportText));
   assert.equal(
-    linesOf(withKinds.reportText).length,
+    dropDeclaration(linesOf(withKinds.reportText)).length,
     linesOf(without.reportText).length - 1,
-    "읽기 성공은 진단 줄 1개가 빠진 만큼 짧다(자격 줄은 자리만 바뀜)",
+    "읽기 성공은 진단 줄 1개가 빠진 만큼 짧다(자격 줄은 자리만 바뀜 · 선언문 범위 절 제외)",
+  );
+  assert.equal(
+    linesOf(without.reportText).some((l) => l.startsWith("선언문 범위 시안")),
+    false,
+    "종류 설정을 못 읽은 회차 = 선언문 범위 절 0줄",
   );
 });
 
 // ---- ⑵ 설정 파일 실물 ---------------------------------------------------------------------------------------------------
 
-test("설정 파일 실물 = 스키마대로 15행 · id k01~k15 · handling 은 세 값뿐 · 8행만 정의상 제외(잠정) · proofDevice 는 예방 증명 행에만 · 코드에 종류 이름 리터럴 0", () => {
+test("설정 파일 실물 = 스키마대로 15행 · id k01~k15 · handling 은 세 값뿐 · 8행만 정의상 제외 · proofDevice 는 예방 증명 행에만 · 코드에 종류 이름 리터럴 0", () => {
   const cfg = JSON.parse(REAL_KINDS);
   assert.equal(cfg.schema_version, KINDS_SCHEMA);
   assert.equal(cfg.kinds.length, 15);
@@ -434,7 +454,7 @@ test("설정 파일 실물 = 스키마대로 15행 · id k01~k15 · handling 은
   const allowed = new Set([
     "prevention-proof",
     "partial-scope",
-    "excluded-by-definition-provisional",
+    "excluded-by-definition",
   ]);
   for (const k of cfg.kinds) {
     assert.ok(allowed.has(k.handling), k.id);
@@ -444,7 +464,7 @@ test("설정 파일 실물 = 스키마대로 15행 · id k01~k15 · handling 은
   }
   assert.deepEqual(
     cfg.kinds
-      .filter((k) => k.handling === "excluded-by-definition-provisional")
+      .filter((k) => k.handling === "excluded-by-definition")
       .map((k) => k.id),
     ["k08"],
   );
@@ -524,7 +544,7 @@ test("전이: 없음 -> 부분 있음 첫 회차 받는함 1장(줄의 값 포�
   assert.match(body, /없음 -> 부분 있음/);
   assert.match(
     body,
-    /알려진 못 세는 종류 15 = 예방 증명 0 \/ 부분 범위 14 \/ 정의상 제외\(잠정\) 1/,
+    /알려진 못 세는 종류 15 = 예방 증명 0 \/ 부분 범위 14 \/ 정의상 제외 1/,
   );
   assert.match(body, /«ㄴ=0» 판정이 아닙니다/);
   assert.equal(

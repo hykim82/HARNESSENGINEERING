@@ -19,7 +19,8 @@ import { runPartialCountStep } from "./watch-run.mjs";
 
 const NOW = Date.parse("2026-11-15T15:00:00+09:00");
 const CONFIG_PATH = "scripts/supervisor/partial-count-machine-scope.json";
-const SCHEMA = "partial-count-machine-scope/v2";
+// HYK-255-skipday-scope-1 바뀐 문면(뜻 무변): 설정 스키마 v2 -> v3(건너뜀 두 칸 추가). 이 파일의 합성 설정은 lowDayHandling = break -- 적은 날 = 끊김(건너뜀 이전 동작)을 그대로 단언하는 회귀 시험으로 산다.
+const SCHEMA = "partial-count-machine-scope/v3";
 const OLD_SCHEMA = "partial-count-machine-scope/v1";
 const SCOPE_PREFIX = "기계 계수 범위 기준: ";
 // HYK-255-p2d-nonecause-1 바뀐 단언(판정 2026-11-16 1804 상신 1): 옛 상수 줄 리터럴 -> 프로덕션 렌더 출력. 이 파일의 보고서는 기준 «충족» + 종류 설정 파일 없는 합성 저장소라
@@ -49,6 +50,8 @@ const SYNTH = {
   minDeliveredPerDay: 3,
   lastTickCutoffKst: "23:15",
   criterionChangedOn: "2026-11-01",
+  lowDayHandling: "break",
+  lowDayHandlingChangedOn: "2026-11-10",
 };
 
 // ---- 합성 일별 줄 -----------------------------------------------------------------------------------------------------
@@ -89,7 +92,7 @@ const renderScope = (lines, cfg = SYNTH) =>
 
 // 자기 줄의 토막 읽기.
 const verdictOf = (line) => /^기계 계수 범위 기준: (\S+)/.exec(line)?.[1];
-const streakDays = (line) => Number(/연속 (\d+)일/.exec(line)?.[1]);
+const streakDays = (line) => Number(/일한 날 (\d+)일/.exec(line)?.[1]);
 // [기준 일수, 배달 문턱, 마지막 회차 컷(HH:MM)] -- 줄의 «기준» 토막.
 const criterion = (line) => {
   const m =
@@ -100,7 +103,7 @@ const criterion = (line) => {
 };
 // 기준 변경 표기(날짜).
 const changedOn = (line) => /기준 변경 (\d{4}-\d{2}-\d{2})/.exec(line)?.[1];
-const countedRange = (line) => /센 날 (\S+)/.exec(line)?.[1];
+const countedRange = (line) => /달력 기간 (\S+)/.exec(line)?.[1];
 const lastBreak = (line) =>
   /마지막 끊김 (\d{4}-\d{2}-\d{2}) (.*?)(?: — |$)/.exec(line)?.slice(1);
 
@@ -716,7 +719,7 @@ test("일별 단계: 읽은 일별 줄을 보고 단계 옵션 machineScopeDaily
 
 // ---- 설정 파일 · 코드 리터럴 -----------------------------------------------------------------------------------------
 
-test("실물 설정 파일 = 스키마(v2)대로 · 문턱 · 컷 · 기준 변경일이 «이 한 파일» 에만 있다 -- 코드(core · report)에는 그 값을 대입한 리터럴이 없고 옛 키(minConcurrentTracks)는 설정에 없다", () => {
+test("실물 설정 파일 = 스키마(v3)대로 · 문턱 · 컷 · 기준 변경일이 «이 한 파일» 에만 있다 -- 코드(core · report)에는 그 값을 대입한 리터럴이 없고 옛 키(minConcurrentTracks)는 설정에 없다", () => {
   const raw = fs.readFileSync(
     new URL("./partial-count-machine-scope.json", import.meta.url),
     "utf8",
@@ -740,6 +743,8 @@ test("실물 설정 파일 = 스키마(v2)대로 · 문턱 · 컷 · 기준 변�
   assert.deepEqual(Object.keys(wellFormed).sort(), [
     "criterionChangedOn",
     "lastTickCutoffKst",
+    "lowDayHandling",
+    "lowDayHandlingChangedOn",
     "minDeliveredPerDay",
     "observationDays",
     "schema_version",
@@ -763,7 +768,11 @@ test("실물 설정 파일 = 스키마(v2)대로 · 문턱 · 컷 · 기준 변�
       `${file} 에 관측 일수 · 배달 문턱 리터럴`,
     );
     // 실물 설정의 컷 · 기준 변경일 · 문턱 값이 코드에 문자열/숫자 리터럴로 박혀 있지 않다(설정 값에서 읽어 비교).
-    for (const value of [cfg.lastTickCutoffKst, cfg.criterionChangedOn]) {
+    for (const value of [
+      cfg.lastTickCutoffKst,
+      cfg.criterionChangedOn,
+      cfg.lowDayHandlingChangedOn,
+    ]) {
       assert.equal(
         src.includes(value),
         false,
@@ -804,7 +813,7 @@ test("실물 설정 본문을 합성 origin/master 에 심으면 같은 파서�
     cfg.lastTickCutoffKst,
   ]);
   assert.equal(changedOn(scope), cfg.criterionChangedOn);
-  // 실물 컷 1분 전 = 끊김 · 문턱 - 1 = 끊김.
+  // 실물 컷 1분 전 = 끊김 · 문턱 - 1 = (실물 설정 = skip) 건너뜀 -- 7일 모두 건너뜀이면 일한 날 0 = 미충족(단언 무변 · 건너뜀 쪽 정본 시험은 partial-count-skipday.test.mjs).
   const early = await runReport(buildRepo(raw), {
     machineScopeDailyLines: dayLines(-7, -1, (o) => ({
       delivered: K,

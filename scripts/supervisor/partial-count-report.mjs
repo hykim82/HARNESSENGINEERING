@@ -118,6 +118,8 @@ import {
   renderMachineScopeLine,
   computeQualification,
   renderQualificationLine,
+  renderDeclarationScopeLines,
+  isLowDayHandling,
   isUncountableHandling,
   UNCOUNTABLE_HANDLING,
   QUALIFICATION_DIAG_PREFIX,
@@ -1645,15 +1647,17 @@ export async function readGithubBotLogins({ git, botAccountsPath }) {
 // 대체하지도 않는다. 일별 줄은 watch-run 일별 단계가 읽어 옵션으로 넘긴다(machineScopeDailyLines · 없음 = 미결선 = 줄 0개 · null = 못 읽음).
 // HYK-255-p2e-workday-2 -- v2(일한 날 기준): 관측 일수 · 하루 배달 문턱 · 마지막 회차 컷(KST «HH:MM») · 기준 변경일(«YYYY-MM-DD») 이 «이 설정 한 곳» 에만 있다.
 //   옛 판(v1 · 동시 배달 문턱 minConcurrentTracks)은 스키마 불일치로 UNKNOWN -- 옛 키를 새 뜻으로 재사용하지 않는다.
+// HYK-255-skipday-scope-1 -- v3(적은 날 건너뜀): v2 의 4칸 + lowDayHandling(skip | break) + lowDayHandlingChangedOn(«YYYY-MM-DD»). 옛 v2 · 칸 없음 · 모르는 값 = UNKNOWN(fail-closed · 기본값 대체 0).
+//   뒤집기(건너뜀 -> 끊김) = 이 설정의 lowDayHandling 한 칸(break = 건너뜀 이전 동작).
 // ---------------------------------------------------------------------------
 
 export const DEFAULT_MACHINE_SCOPE_PATH =
   "scripts/supervisor/partial-count-machine-scope.json";
-const MACHINE_SCOPE_SCHEMA = "partial-count-machine-scope/v2";
+const MACHINE_SCOPE_SCHEMA = "partial-count-machine-scope/v3";
 
 const isPositiveInteger = (v) => Number.isInteger(v) && v > 0;
 
-// 설정 파일 본문 -> {ok:true, observationDays, minDeliveredPerDay, lastTickCutoffKst, criterionChangedOn} | {ok:false, reason}.
+// 설정 파일 본문 -> {ok:true, observationDays, minDeliveredPerDay, lastTickCutoffKst, criterionChangedOn, lowDayHandling, lowDayHandlingChangedOn} | {ok:false, reason}.
 function parseMachineScopeConfig(text) {
   let parsed;
   try {
@@ -1666,11 +1670,13 @@ function parseMachineScopeConfig(text) {
     isPositiveInteger(parsed.observationDays) &&
     isPositiveInteger(parsed.minDeliveredPerDay) &&
     parseKstClockMinutes(parsed.lastTickCutoffKst) !== null &&
-    isCalendarDay(parsed.criterionChangedOn);
+    isCalendarDay(parsed.criterionChangedOn) &&
+    isLowDayHandling(parsed.lowDayHandling) &&
+    isCalendarDay(parsed.lowDayHandlingChangedOn);
   if (!wellFormed) {
     return {
       ok: false,
-      reason: `스키마 불일치(${MACHINE_SCOPE_SCHEMA} · observationDays · minDeliveredPerDay 는 양의 정수 · lastTickCutoffKst 는 «HH:MM» · criterionChangedOn 은 «YYYY-MM-DD»)`,
+      reason: `스키마 불일치(${MACHINE_SCOPE_SCHEMA} · observationDays · minDeliveredPerDay 는 양의 정수 · lastTickCutoffKst 는 «HH:MM» · criterionChangedOn · lowDayHandlingChangedOn 은 «YYYY-MM-DD» · lowDayHandling 은 skip | break)`,
     };
   }
   return {
@@ -1679,6 +1685,8 @@ function parseMachineScopeConfig(text) {
     minDeliveredPerDay: parsed.minDeliveredPerDay,
     lastTickCutoffKst: parsed.lastTickCutoffKst,
     criterionChangedOn: parsed.criterionChangedOn,
+    lowDayHandling: parsed.lowDayHandling,
+    lowDayHandlingChangedOn: parsed.lowDayHandlingChangedOn,
   };
 }
 
@@ -1708,7 +1716,9 @@ async function readMachineScopeConfig({ git, machineScopePath }) {
 
 export const DEFAULT_UNCOUNTABLE_KINDS_PATH =
   "scripts/supervisor/partial-count-uncountable-kinds.json";
-const UNCOUNTABLE_KINDS_SCHEMA = "partial-count-uncountable-kinds/v1";
+// HYK-255-skipday-scope-1 -- v2: 모든 행에 쉬운 말 칸 plain(필수 · 선언문 범위 절이 이 값을 그대로 싣는다) · 정의상 제외 행에는 한계 줄 plainLimit 도 필수(다른 행은 없음).
+//   옛 v1 · 옛 처리 값(excluded-by-definition-provisional)은 스키마 불일치 · 모르는 handling = 읽기 실패.
+const UNCOUNTABLE_KINDS_SCHEMA = "partial-count-uncountable-kinds/v2";
 // 종류 id 꼴 = k + 숫자 -- 설계 식별자(U · V · Q · P · ㄱ/ㄴ 번호)와 겹치지 않는다.
 const KIND_ID_RE = /^k\d+$/;
 
@@ -1729,8 +1739,19 @@ function kindRowProblem(kind, seenIds) {
   if (!KIND_ID_RE.test(String(kind.id))) return `id 꼴 오류(${kind.id})`;
   if (seenIds.has(kind.id)) return `id 중복(${kind.id})`;
   seenIds.add(kind.id);
+  return kindTextProblem(kind) ?? kindHandlingProblem(kind);
+}
+
+// 글 칸(name · plain · source) 점검 -> 오류 사유 | null.
+function kindTextProblem(kind) {
   if (!isNonEmptyString(kind.name)) return `${kind.id}: name 없음`;
+  if (!isNonEmptyString(kind.plain)) return `${kind.id}: plain(쉬운 말) 없음`;
   if (!isNonEmptyString(kind.source)) return `${kind.id}: source 없음`;
+  return null;
+}
+
+// 처리 값과 그 처리 값이 요구하는 칸(예방 증명 = proofDevice · 정의상 제외 = plainLimit) 점검 -> 오류 사유 | null.
+function kindHandlingProblem(kind) {
   if (!isUncountableHandling(kind.handling)) {
     return `${kind.id}: 모르는 handling(${kind.handling})`;
   }
@@ -1739,6 +1760,12 @@ function kindRowProblem(kind, seenIds) {
     !isRepoRelativePath(kind.proofDevice)
   ) {
     return `${kind.id}: 예방 증명인데 proofDevice(저장소 상대 경로) 없음`;
+  }
+  if (
+    kind.handling === UNCOUNTABLE_HANDLING.EXCLUDED_BY_DEFINITION &&
+    !isNonEmptyString(kind.plainLimit)
+  ) {
+    return `${kind.id}: 정의상 제외인데 plainLimit(못 덮는 경우 한 줄) 없음`;
   }
   return null;
 }
@@ -1846,6 +1873,8 @@ async function resolveMachineScope({
     minDeliveredPerDay: config.minDeliveredPerDay,
     lastTickCutoffKst: config.lastTickCutoffKst,
     criterionChangedOn: config.criterionChangedOn,
+    lowDayHandling: config.lowDayHandling,
+    lowDayHandlingChangedOn: config.lowDayHandlingChangedOn,
   });
   const machineScopeLine = renderMachineScopeLine(scope);
   if (scope.met !== true) {
@@ -1866,11 +1895,18 @@ async function resolveMachineScope({
       qualificationDiagLine: `${QUALIFICATION_DIAG_PREFIX}종류 설정 읽기 실패(${oneLineReason(kinds.reason)}) — «1-C 판정 자격» 은 «없음» 그대로`,
     };
   }
+  const qualification = computeQualification({
+    machineScope: scope,
+    kinds: kinds.kinds,
+  });
   return {
     machineScopeLine,
-    qualificationLine: renderQualificationLine(
-      computeQualification({ machineScope: scope, kinds: kinds.kinds }),
-    ),
+    qualificationLine: renderQualificationLine(qualification),
+    // 자격 «부분 있음» 회차에만 비어 있지 않다(그 밖 = 0줄) -- 범위 밖 종류의 쉬운 말은 종류 설정에서 그대로 온다.
+    declarationScopeLines: renderDeclarationScopeLines({
+      qualification,
+      kinds: kinds.kinds,
+    }),
   };
 }
 
@@ -3898,6 +3934,7 @@ function assemblePartialCountReportText({
     machineScopeLine: machineScope.machineScopeLine,
     qualificationLine: machineScope.qualificationLine,
     qualificationDiagLine: machineScope.qualificationDiagLine,
+    declarationScopeLines: machineScope.declarationScopeLines,
     generatedAtMs: now,
     windowStartMs,
     windowEndMs,
