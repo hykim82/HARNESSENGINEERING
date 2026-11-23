@@ -271,6 +271,52 @@ test("ⓐ 프로덕션 진입점 1회(기본 옵션 · 상한 인자 없이) · 
   }
 });
 
+// HYK-255-g3-record-1 (설계 (라) · 값 12 무변 단언) -- ㄱ-3 GitHub 기록(S4)을 켠 기본 옵션 회차도 «회차 총 ≤ 12 · 시간당 ≤ 48» 이고 S4 몫은 P3 뒤 남는 몫이다.
+test("ⓐ ㄱ-3 GitHub 기록(S4)을 켠 프로덕션 진입점 1회(기본 옵션) · ㄱ-4 후보 3 · D1 후보 5 -> 천장 값 12 무변 · 회차 총(S4 목록 포함) ≤ 12 · 시간당 ≤ 48 · S4 는 앞 셋 뒤에 남는 몫만", async () => {
+  assert.equal(report.PER_TICK_CALL_CEILING, 12, "회차 천장 값 무변");
+  const repo = buildRepo([2, 2, 1]);
+  try {
+    const { fetchJson: inner, calls } = makeCountingFetch(repo);
+    const s4 = [];
+    const wrapped = async (args) => {
+      if (/\/pulls\?state=all&base=gate3-record/.test(args.url)) {
+        s4.push(calls.gate4.length + calls.d1.length + calls.events.length);
+        return { ok: true, status: 200, json: [], linkHeader: null };
+      }
+      return inner(args);
+    };
+    const root = tmpDir("nc-rest-cap-g3-");
+    let result;
+    try {
+      result = await report.runPartialCountOnce({
+        now: NOW,
+        repoRoot: repo.dir,
+        dispatchReceiptsPath: join(root, "none.jsonl"),
+        watchLogPath: join(root, "watch.log"),
+        extraRepoRoots: [],
+        archiveRoot: join(root, "archive-missing"),
+        fetchJson: wrapped,
+        git: report.createProcessGitPort(repo.dir),
+        gitWorktreeListExecFn: () => "",
+        gate3RecordBase: "gate3-record",
+      });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+    const before = calls.gate4.length + calls.d1.length + calls.events.length;
+    assert.equal(calls.gate4.length + calls.d1.length, 9, "ㄱ-4 5 + D1 4");
+    assert.equal(s4.length, 1, "S4 목록 호출 1(빈 목록 -> 상세 0)");
+    assert.equal(s4[0], before, "S4 는 앞 셋(ㄱ-4 · D1 · P3) 뒤에 부른다");
+    const total = before + s4.length;
+    assert.ok(total <= 12, `회차 총 ${total} > 12`);
+    assert.ok(total * ROUNDS_PER_HOUR <= 48);
+    assert.equal(Math.min(2, 12 - before), 1, "남는 몫 = min(2, 12 - 11) = 1");
+    assert.ok(result.reportText.includes("- ㄱ-3 GitHub 기록(한용 Merge"));
+  } finally {
+    cleanup(repo);
+  }
+});
+
 test("ⓐ 상한 밖 후보는 «미조회(예산)» 으로 남는다(숨김 0): ㄱ-4 후보 3 중 1 조회 · 2 미조회(예산) · D1 후보 5 중 4 조회 · 1 미조회(예산)", async () => {
   const repo = buildRepo([2, 2, 1]);
   try {

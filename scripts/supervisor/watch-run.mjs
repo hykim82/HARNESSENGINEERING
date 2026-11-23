@@ -3405,8 +3405,17 @@ export function buildPartialCountStepOptions({
   outboxDir,
   relayGlob,
   inboxDir,
+  gate3RecordBase,
 }) {
-  return { repoRoot, watchLogPath, outboxDir, relayGlob, inboxDir };
+  // HYK-255-g3-record-1 -- gate3RecordBase 는 «값이 있을 때만» 키를 싣는다(opt-in · 안 준 호출자는 옛 옵션 모양 그대로 = 회귀 0).
+  return {
+    repoRoot,
+    watchLogPath,
+    outboxDir,
+    relayGlob,
+    inboxDir,
+    ...(gate3RecordBase ? { gate3RecordBase } : {}),
+  };
 }
 
 // HYK-255-outbox-aux-1-r3 (coder-task.md §2 ⓐ · REVIEW-r2 ⓑ "고치는 길"
@@ -3424,11 +3433,14 @@ export function buildPartialCountStepOptions({
 function parseRelayLedgerArgv(argv) {
   let relayGlob = null;
   let inboxDir = null;
+  let gate3RecordBase = null;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--relay-glob") relayGlob = argv[++i];
     else if (argv[i] === "--inbox-dir") inboxDir = argv[++i];
+    // HYK-255-g3-record-1 -- ㄱ-3 GitHub 기록(S4)의 기록 가지 이름(opt-in · 없으면 null).
+    else if (argv[i] === "--gate3-record-base") gate3RecordBase = argv[++i];
   }
-  return { relayGlob, inboxDir };
+  return { relayGlob, inboxDir, gate3RecordBase };
 }
 
 export async function runWatchCliPartialCountStep({
@@ -3449,7 +3461,7 @@ export async function runWatchCliPartialCountStep({
     else if (argv[i] === "--admission-sweep-ledger")
       admissionLedgerPath = argv[++i];
   }
-  const { relayGlob, inboxDir } = parseRelayLedgerArgv(argv);
+  const { relayGlob, inboxDir, gate3RecordBase } = parseRelayLedgerArgv(argv);
   const stepFn =
     runPartialCountStepFn === undefined
       ? runPartialCountStep
@@ -3466,6 +3478,7 @@ export async function runWatchCliPartialCountStep({
       outboxDir,
       relayGlob,
       inboxDir,
+      gate3RecordBase,
     }),
   });
 }

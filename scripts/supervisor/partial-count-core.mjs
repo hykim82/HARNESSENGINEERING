@@ -377,6 +377,66 @@ export function renderGateAuxObservationLine(gateAux) {
   );
 }
 
+// HYK-255-g3-record-1 (전달 #20261123-1740 확정 2 · 판정 #20261123-1905 G1 ⓐ · G4 ⓐ) -- ㄱ-3 «GitHub 기록» 줄. 한용이 전용 기록 가지
+// (gate3-record)의 결정 PR 을 Merge 한 사건을 수집기(wire 의 collectGate3Record)가 센 값을 줄로 바꾼다. 기록만 · 차단 0 · 커버리지 분자 · 분모에
+// 들어가지 않는다(INDEPENDENT_ANCHOR_COVERED_GATE_NUMBERS 는 이 함수가 읽지 않는다 · buildGaSection 의 커버리지 두 줄 무변).
+// 입력 없음(null · undefined = 미결선 호출자) = 줄 0개. 미조회(예산 · rate limit) · 수집 실패는 0 으로 접지 않고 «0 아님» 으로 쓴다.
+// 이 함수는 던지지 않고 아무것도 쓰지 않는다(순수 렌더).
+const GATE3_RECORD_LABEL = "- ㄱ-3 GitHub 기록";
+
+function renderGate3EventLine(ev) {
+  // 병합 시각 «MM-DD HH:MM KST» -- formatKst(KST 고정 · 실행 환경 TZ 무관)의 월일 시분만 쓴다.
+  const at = Number.isFinite(ev.mergedAtMs)
+    ? `${formatKst(ev.mergedAtMs).slice(5, 16)} KST`
+    : "시각 불명";
+  return `  · 확인 사건: PR#${ev.pullNumber} #${ev.number} 병합자 ${ev.mergedBy} ${at}`;
+}
+
+function renderGate3RelayCrossLine(cross) {
+  const label = "  · 전달 ㄱ-3 분류(자기 분류 · 독립 아님)";
+  if (!cross || cross.wired !== true)
+    return `${label}: 교차 미결선(--relay-glob 없음)`;
+  if (cross.known !== true)
+    return `${label}: UNKNOWN(${cross.reason ?? "사유 미상"}) — 0 아님`;
+  const readFail =
+    cross.readFailures > 0
+      ? ` · 전달 파일 읽기 실패 ${cross.readFailures}건(0 아님)`
+      : "";
+  return (
+    `${label} ${cross.total}건 중 기록 짝 ${cross.paired} · 짝 없음 ${cross.total - cross.paired}` +
+    ` · 전달 없는 기록 ${cross.recordsWithoutRelay}${readFail}`
+  );
+}
+
+export function renderGate3RecordLines(g) {
+  if (!g) return [];
+  if (g.known !== true) {
+    return g.unchecked === true
+      ? [`${GATE3_RECORD_LABEL}: 미조회(${g.reason} · 0 아님)`]
+      : [`${GATE3_RECORD_LABEL}: UNKNOWN(${g.reason}) — 0 아님`];
+  }
+  const invalid =
+    g.invalidNotAllowlisted + g.invalidBotOrAuthor + g.invalidShape;
+  const u = g.unresolved;
+  const unresolvedTotal = u.budget + u.failed + u.rateLimited;
+  const unresolved =
+    unresolvedTotal > 0
+      ? ` · 상세 미확정 ${unresolvedTotal}(예산 ${u.budget} · 조회 실패 ${u.failed} · rate limit ${u.rateLimited}) — 0 아님`
+      : "";
+  const dup =
+    g.duplicates > 0
+      ? ` · 같은 번호 중복 병합 ${g.duplicates}(1사건으로만 셈)`
+      : "";
+  return [
+    `${GATE3_RECORD_LABEL}(한용 Merge · 기록만 · 차단 0): 독립 확인 ${g.confirmed}건` +
+      ` · 대기(열림) ${g.open} · 무효 ${invalid}(병합자 명단 밖 ${g.invalidNotAllowlisted}` +
+      ` · 봇·작성자 병합 ${g.invalidBotOrAuthor} · 모양 위반 ${g.invalidShape})` +
+      ` · 닫힘(미병합) ${g.closedUnmerged} · 이번 회차 조회 ${g.calls}${dup}${unresolved}`,
+    renderGate3RelayCrossLine(g.relayCross),
+    ...g.events.map(renderGate3EventLine),
+  ];
+}
+
 // HYK-255-g-aux-render-1 커밋 2 (D3 ⑵) -- ㄱ-4 «UNDECIDABLE N» 에 사유 분포를
 // 붙인다: «UNDECIDABLE 2(사유: HTTP_FAILED 1 · RATE_LIMITED 1)». 사유는 wire 가
 // 이미 받은 판정(gate4.undecidableReasons = {사유 코드: 건수})에서 전달한다 --
@@ -426,7 +486,7 @@ function buildGate4CacheLines(gate4) {
   return lines;
 }
 
-function buildGaSection(gate4, auxNote, gateAux) {
+function buildGaSection(gate4, auxNote, gateAux, gate3Record) {
   const lines = ["ㄱ 설계된 정지:"];
   if (gate4.known === true) {
     lines.push(
@@ -447,6 +507,8 @@ function buildGaSection(gate4, auxNote, gateAux) {
   } else {
     lines.push(`- 외부 독립 앵커로 확인: UNKNOWN(${gate4.reason})`);
   }
+  // HYK-255-g3-record-1 -- ㄱ-3 GitHub 기록(별도 줄 · G4 ⓐ): 입력이 없으면 줄 0개 · 커버리지 두 줄은 아래에서 그대로.
+  lines.push(...renderGate3RecordLines(gate3Record));
   lines.push(`- ORCH-writeable 보조 관측: ${auxNote} — 독립 계수에 미산입`);
   const gateAuxLine = renderGateAuxObservationLine(gateAux);
   if (gateAuxLine) lines.push(gateAuxLine);
@@ -759,6 +821,9 @@ export function buildPartialCountReport({
   // HYK-255-p3-gh-1 -- 기본값 undefined -> ㄴ 절 새 줄 0개 · 분자 합산 0(미결선 호출자 회귀 0). 값 = assembleGithubHumanActions 결과(2R:
   // 실시간 목록 3종) + 수집 부가 칸(wire 의 collectGithubHumanActions) · 미조회 {known:false, unchecked:true, reason} · 수집 실패 {known:false, reason}.
   githubHumanActions,
+  // HYK-255-g3-record-1 -- 기본값 undefined -> ㄱ 절 새 줄 0개(미결선 호출자 회귀 0). 값 = wire 의 collectGate3Record 결과(독립 확인 · 미조회 · UNKNOWN).
+  // 커버리지 상수 · ㄱ-4 확인 수와 «별개 입력» -- 둘 어디에도 더하지 않는다.
+  gate3Record,
 }) {
   const lines = [];
   lines.push("집계 성격: PARTIAL — 전수 아님");
@@ -791,7 +856,9 @@ export function buildPartialCountReport({
     "(기준 단위: 배달·소비 = 레코드 수 · 영수증 결손 = 영수증 없는 고유 라벨 수 — 단위가 달라 «배달−소비=결손»이 성립하지 않음)",
   );
   lines.push("");
-  lines.push(...buildGaSection(gate4, auxNote, gateAuxObservation));
+  lines.push(
+    ...buildGaSection(gate4, auxNote, gateAuxObservation, gate3Record),
+  );
   lines.push("");
   lines.push(
     ...buildLnSection(

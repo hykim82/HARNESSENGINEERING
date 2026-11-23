@@ -2099,6 +2099,299 @@ async function collectGithubHumanActionsSafely(args) {
 }
 
 // ---------------------------------------------------------------------------
+// HYK-255-g3-record-1 (묶음 B · 조각 B1 · 전달 #20261123-1740 확정 2 · 판정 #20261123-1905 G1 ⓐ · G4 ⓐ) -- ㄱ-3 «GitHub 기록» 수집기(S4).
+//   한용 손 = 전용 기록 가지(GATE3_RECORD_BASE)로 열린 «결정 PR» 의 Merge 1회(휴대폰 · 승인 리뷰 불요). 수집기는 «기록만» 센다 -- 이 기록이 없다고
+//   아무것도 막지 않는다(배달 게이트 · 발행 스크립트 · 일별 끊김 사유 · 받는함 통지 · 종료 코드 무접촉 · 새 코드는 보고 줄 · 관측 건강 행뿐).
+//   한 사건(= 독립 확인 1건) = 아래를 «모두» 만족하는 기록 PR 1개:
+//     ⓐ base.ref == 기록 가지 ⓑ head.ref = `g3-<번호>` ∧ 제목이 고정 머리(GATE3_RECORD_TITLE_HEAD)로 시작하고 머리 뒤 같은 `#<번호>` (판정 1905 · M23)
+//     ⓒ 작성자 login ∈ 봇 목록(origin/master) ⓓ merged_at 이 창 안 ⓔ 상세 `pulls/{n}` 의 merged_by login+id ∈ 허용 명단(origin/master) ∧ ≠ 작성자 ∧ ∉ 봇 목록.
+//   ⛔캐시 0 -- 양성 결과를 파일에 남기지 않는다(ORCH 가 쓸 수 있는 파일이면 «한용 병합 1건» 을 지어낼 수 있다 · C1 캐시 자인과 같은 구멍).
+//   예산 = P3 뒤 남는 몫 = githubHumanBudget(앞 셋이 쓴 호출 수) = min(2, 12 - 사용) -- 목록 1 + 상세는 남는 만큼(보통 1). 회차 천장 12 · 시간당 48 무변.
+//   못 부른 상세(예산 · 실패 · rate limit)는 무효로 접지도 0 으로 접지도 않고 «상세 미확정 N — 0 아님» 으로 드러낸다.
+//   ⚠️정직 한계: ⑴ 한용이 결정 PR 을 읽지 않고 눌러도 기록은 «그 글에 Merge 를 눌렀다» 까지다 ⑵ 분모(전달 ㄱ-3 분류)는 ORCH-writeable 자기 분류 -- 교차는 참고
+//   칸이다 ⑶ 사람 자격 부재(S5) 측정 전에는 병합자 대조도 «조건부 독립» 이다 ⑷ 목록 100건이 차면 UNKNOWN(잘림) -- 기록이 쌓이면 정리가 필요하다.
+// ---------------------------------------------------------------------------
+
+export const GATE3_RECORD_BASE = "gate3-record";
+// 결정 PR 제목 맨 앞 고정 머리(판정 #20261123-1905 1) -- 코드 PR 과 한눈에 구별. 머리 문자열은 여기 한 곳.
+export const GATE3_RECORD_TITLE_HEAD = "[게이트3 승인 기록]";
+const GATE3_LIST_PAGE_SIZE = 100;
+const GATE3_HEAD_REF_RE = /^g3-(\d{8}-\d{4}[a-z]?)$/;
+
+const gate3ListUrl = (repoFullName, recordBase) =>
+  `https://api.github.com/repos/${repoFullName}/pulls?state=all&base=${encodeURIComponent(recordBase)}` +
+  `&sort=created&direction=desc&per_page=${GATE3_LIST_PAGE_SIZE}`;
+
+// 목록 응답 -> 못 쓰는 응답이면 {known:false …} 결과 · 쓸 수 있으면 null.
+function gate3ListFailure(listed) {
+  if (listed.kind === "rateLimited")
+    return githubUnchecked(`rate limit · ${listed.detail}`);
+  if (listed.kind === "failure")
+    return githubFailed(`기록 PR 목록 ${listed.detail}`);
+  if (!Array.isArray(listed.json))
+    return githubFailed("기록 PR 목록 응답 모양 위반(배열 아님)");
+  if (listed.json.length >= GATE3_LIST_PAGE_SIZE)
+    return githubFailed(
+      `기록 PR 목록 ${GATE3_LIST_PAGE_SIZE}건 꽉 참(잘렸을 수 있다)`,
+    );
+  return null;
+}
+
+// 모양 칸(ⓐⓑⓒ) -- 통과하면 `<번호>` · 아니면 null. 고정 머리 뒤 `#<번호>` 는 «같은 번호 + 공백 또는 끝» 이라야 한다(`#…1740a` 는 다른 번호).
+function gate3ShapeNumber(pr, recordBase, botLogins) {
+  if (!pr || typeof pr !== "object" || pr.base?.ref !== recordBase) return null;
+  const m = GATE3_HEAD_REF_RE.exec(String(pr.head?.ref ?? ""));
+  if (!m || !gate3TitleMatches(pr.title, m[1])) return null;
+  const login = pr.user?.login;
+  return typeof login === "string" && botLogins.has(login.toLowerCase())
+    ? m[1]
+    : null;
+}
+
+// 제목 = 고정 머리 + « #<번호>» 로 시작하고 그 뒤가 끝이거나 공백이다(`#…1740a` 는 다른 번호 · 머리 앞에 다른 글자가 오면 머리가 아니다).
+function gate3TitleMatches(rawTitle, number) {
+  const prefix = `${GATE3_RECORD_TITLE_HEAD} #${number}`;
+  const title = String(rawTitle ?? "");
+  if (!title.startsWith(prefix)) return false;
+  const rest = title.slice(prefix.length);
+  return rest === "" || /^\s/.test(rest);
+}
+
+// 상태 칸 -- 열림은 창과 무관(지금 대기 중) · 병합은 merged_at · 닫힘(미병합)은 closed_at 이 창 안일 때만. 창 밖 = ignore · 시각 못 읽음 = bad(모양 위반).
+function gate3PrState(pr, windowStartMs, windowEndMs) {
+  if (!pr || typeof pr !== "object") return { kind: "bad" };
+  if (!pr.merged_at && pr.state === "open") return { kind: "open" };
+  const at = Date.parse(pr.merged_at || pr.closed_at);
+  if (!Number.isFinite(at)) return { kind: "bad" };
+  if (at < windowStartMs || at > windowEndMs) return { kind: "ignore" };
+  return pr.merged_at ? { kind: "merged", at } : { kind: "closed" };
+}
+
+// 목록 한 번 훑기 -> 상태별 수 + 상세로 갈 후보 + 전달 교차용 번호 집합(짝 = 창 무관 · 전달 없는 기록 = 창 안).
+function classifyGate3Prs({
+  items,
+  recordBase,
+  botLogins,
+  windowStartMs,
+  windowEndMs,
+}) {
+  const t = {
+    open: 0,
+    closed: 0,
+    shapeBad: 0,
+    candidates: [],
+    pairNumbers: new Set(),
+    windowNumbers: new Set(),
+  };
+  for (const pr of items) {
+    const number = gate3ShapeNumber(pr, recordBase, botLogins);
+    if (number) t.pairNumbers.add(number);
+    const state = gate3PrState(pr, windowStartMs, windowEndMs);
+    if (state.kind === "ignore") continue;
+    if (state.kind === "bad" || !number) {
+      t.shapeBad += 1;
+      continue;
+    }
+    t.windowNumbers.add(number);
+    if (state.kind === "open") t.open += 1;
+    else if (state.kind === "closed") t.closed += 1;
+    else
+      t.candidates.push({
+        number,
+        pullNumber: pr.number,
+        author: { login: pr.user.login, id: pr.user.id },
+        mergedAtMs: state.at,
+      });
+  }
+  return t;
+}
+
+// 병합자 판정(상세 응답 1건) -> {kind: shape | botOrAuthor | notAllowlisted | confirmed}. 봇 · 작성자 병합이 «명단 밖» 보다 먼저다(봇은 명단에 없어도 «봇 병합»).
+function judgeGate3Merger(json, author, allowlist, botLogins) {
+  const mb = json?.merged_by;
+  if (!mb || typeof mb.login !== "string" || !Number.isInteger(mb.id))
+    return { kind: "shape" };
+  const login = mb.login.toLowerCase();
+  // 작성자 동일 = login 같음 «또는» id 같음(계정 이름을 바꿔도 같은 계정이다).
+  const isAuthor =
+    login === author.login.toLowerCase() ||
+    (Number.isInteger(author.id) && mb.id === author.id);
+  if (botLogins.has(login) || isAuthor) return { kind: "botOrAuthor" };
+  if (!isAllowlistedAuthor(mb, allowlist)) return { kind: "notAllowlisted" };
+  return { kind: "confirmed", mergedBy: mb.login };
+}
+
+// 창 안 병합 후보를 «최근 병합부터» 상세로 확인한다(상세 호출 상한 = detailBudget). 같은 번호가 이미 확인됐으면 중복 표지만 · 호출 0.
+// rate limit 이 나오면 남은 호출을 멈추고 남은 후보는 rate limit 미확정으로 센다.
+async function verifyGate3Candidates({
+  candidates,
+  fetchJson,
+  repoBaseUrl,
+  allowlist,
+  botLogins,
+  detailBudget,
+}) {
+  const v = {
+    events: [],
+    notAllowlisted: 0,
+    botOrAuthor: 0,
+    shape: 0,
+    duplicates: 0,
+    budget: 0,
+    failed: 0,
+    rateLimited: 0,
+    calls: 0,
+  };
+  const confirmed = new Set();
+  const byRecent = [...candidates].sort((a, b) => b.mergedAtMs - a.mergedAtMs);
+  for (const cand of byRecent) {
+    if (confirmed.has(cand.number)) {
+      v.duplicates += 1;
+    } else if (v.rateLimited > 0) {
+      v.rateLimited += 1;
+    } else if (v.calls >= detailBudget) {
+      v.budget += 1;
+    } else {
+      v.calls += 1;
+      const r = await fetchCommitResponse(
+        fetchJson,
+        `${repoBaseUrl}/pulls/${cand.pullNumber}`,
+      );
+      if (r.kind === "rateLimited") v.rateLimited += 1;
+      else if (r.kind === "failure") v.failed += 1;
+      else {
+        const j = judgeGate3Merger(r.json, cand.author, allowlist, botLogins);
+        if (j.kind === "confirmed") {
+          confirmed.add(cand.number);
+          v.events.push({
+            number: cand.number,
+            pullNumber: cand.pullNumber,
+            mergedBy: j.mergedBy,
+            mergedAtMs: cand.mergedAtMs,
+          });
+        } else v[j.kind] += 1;
+      }
+    }
+  }
+  return v;
+}
+
+// 전달 교차(자기 분류 · 독립 아님) -- 창 안 ㄱ-3 전달 d 건 중 같은 번호의 기록 PR(상태 무관 · 창 무관) 짝 · 전달 없는 기록 = 창 안 기록 PR 중 ㄱ-3 전달(창 무관)에 번호가 없는 것.
+// relayGlob 없음 = {wired:false}(교차 미결선) · 못 읽음 = {wired:true, known:false} -- 둘 다 0 으로 접지 않는다.
+function crossGate3WithRelay({
+  relayGlob,
+  readdirFn,
+  readFn,
+  windowStartMs,
+  windowEndMs,
+  pairNumbers,
+  windowNumbers,
+}) {
+  if (!relayGlob) return { wired: false };
+  const read = readRelayFiles({ relayGlob, readdirFn, readFn });
+  if (read.known !== true)
+    return { wired: true, known: false, reason: oneLineReason(read.reason) };
+  const gate3 = dedupeRelayEntriesByNumber(
+    read.entries.filter((e) => e.classification === "ㄱ-3"),
+  ).valid;
+  const inWindow = gate3.filter(
+    (e) =>
+      Number.isFinite(e.timeMs) &&
+      e.timeMs >= windowStartMs &&
+      e.timeMs <= windowEndMs,
+  );
+  const relayNumbers = new Set(gate3.map((e) => e.number));
+  return {
+    wired: true,
+    known: true,
+    total: inWindow.length,
+    paired: inWindow.filter((e) => pairNumbers.has(e.number)).length,
+    recordsWithoutRelay: [...windowNumbers].filter((n) => !relayNumbers.has(n))
+      .length,
+    readFailures: read.readFailures.length,
+  };
+}
+
+export async function collectGate3Record({
+  fetchJson,
+  git,
+  allowlistPath,
+  botAccountsPath,
+  windowStartMs,
+  windowEndMs,
+  budget,
+  recordBase,
+  relayGlob,
+  readdirFn,
+  readFn,
+}) {
+  if (!(budget >= 1)) return githubUnchecked("예산");
+  const repo = await readExternalEvidenceAllowlist({ git, allowlistPath });
+  if (!repo.ok) return githubFailed(`저장소 신원 · 허용 목록: ${repo.reason}`);
+  const bots = await readGithubBotLogins({ git, botAccountsPath });
+  if (!bots.ok) return githubFailed(`봇 목록 읽기 실패: ${bots.reason}`);
+  const repoBaseUrl = `https://api.github.com/repos/${repo.repoFullName}`;
+  const listed = await fetchCommitResponse(
+    fetchJson,
+    gate3ListUrl(repo.repoFullName, recordBase),
+  );
+  const listFailure = gate3ListFailure(listed);
+  if (listFailure) return listFailure;
+  const c = classifyGate3Prs({
+    items: listed.json,
+    recordBase,
+    botLogins: bots.logins,
+    windowStartMs,
+    windowEndMs,
+  });
+  const v = await verifyGate3Candidates({
+    candidates: c.candidates,
+    fetchJson,
+    repoBaseUrl,
+    allowlist: repo.allowlist,
+    botLogins: bots.logins,
+    detailBudget: budget - 1,
+  });
+  return {
+    known: true,
+    recordBase,
+    confirmed: v.events.length,
+    events: [...v.events].sort((a, b) => a.mergedAtMs - b.mergedAtMs),
+    open: c.open,
+    closedUnmerged: c.closed,
+    invalidNotAllowlisted: v.notAllowlisted,
+    invalidBotOrAuthor: v.botOrAuthor,
+    invalidShape: c.shapeBad + v.shape,
+    duplicates: v.duplicates,
+    unresolved: {
+      budget: v.budget,
+      failed: v.failed,
+      rateLimited: v.rateLimited,
+    },
+    calls: 1 + v.calls,
+    budget,
+    relayCross: crossGate3WithRelay({
+      relayGlob,
+      readdirFn,
+      readFn,
+      windowStartMs,
+      windowEndMs,
+      pairNumbers: c.pairNumbers,
+      windowNumbers: c.windowNumbers,
+    }),
+  };
+}
+
+// 수집기가 던져도(주입 포트 결함) 보고 전체를 죽이지 않는다 -- 수집 실패(사유)로 표면화한다.
+async function collectGate3RecordSafely(args) {
+  try {
+    return await collectGate3Record(args);
+  } catch (err) {
+    return githubFailed(`수집기 예외: ${err?.message ?? String(err)}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 수집 4(보조, HYK-255-outbox-aux-1) -- 보내는함(통역) 머리줄 보조 관측.
 // ⛔독립 앵커 아님(ORCH가 쓸 수 있는 폴더) -- ㄱ-4 독립 확인·ㄴ 확인
 // 사건에 전혀 섞이지 않고 renderOutboxAuxNote(partial-count-core.mjs)를
@@ -3571,6 +3864,7 @@ function buildCollectors({
   gateAux,
   permissionResult,
   githubHumanActions,
+  gate3Record,
 }) {
   const collectors = [];
   collectors.push({
@@ -3606,7 +3900,30 @@ function buildCollectors({
   if (permissionEntry) collectors.push(permissionEntry);
   const githubEntry = buildGithubHumanCollectorEntry(githubHumanActions);
   if (githubEntry) collectors.push(githubEntry);
+  const gate3Entry = buildGate3RecordCollectorEntry(gate3Record);
+  if (gate3Entry) collectors.push(gate3Entry);
   return collectors;
+}
+
+// HYK-255-g3-record-1 -- «ㄱ-3기록수집기» 진단 줄(관측 건강). ⛔ok 는 «항상 true» -- 일별 끊김 사유(failedCollectorNames -> collectorFails)에
+// 이 수집기 실패가 들어가면 «기록 없음 = 차단» 이 된다(확정 2 · 변이 M13). 실패 · 미조회는 detail 문면으로만 드러낸다.
+function buildGate3RecordCollectorEntry(g3) {
+  if (!g3) return null;
+  const name = "ㄱ-3기록수집기";
+  if (g3.known === true)
+    return {
+      name,
+      ok: true,
+      detail: `독립 확인 ${g3.confirmed} · 호출 ${g3.calls}/${g3.budget}`,
+    };
+  return {
+    name,
+    ok: true,
+    detail:
+      g3.unchecked === true
+        ? `미조회(${g3.reason})`
+        : `수집 실패(일별 끊김 사유 아님 · 0 아님): ${g3.reason}`,
+  };
 }
 
 // HYK-255-p3-gh-1 -- «GitHub사람손수집기» 진단 줄(관측 건강). 미조회(예산 · 창 · rate limit)는 D1 후보 미조회와 같은 관례로 OK +
@@ -3773,9 +4090,14 @@ function resolveValueOptions(options) {
     windowHours: options.windowHours ?? DEFAULT_WINDOW_HOURS,
     // HYK-255-c1-approval-cache-1 -- ㄱ-4 조회 옵션 묶음 {maxMergeChecks(몫 · 무변), approvalCachePath(판정 캐시 파일 경로 · null = 끔 = 옛 동작)}.
     // 해석 규칙은 resolveApprovalCachePath. 한 덩어리로 넘기는 것은 runPartialCountOnce 의 eslint max-lines-per-function 예산 때문이다.
+    // HYK-255-g3-record-1 -- 같은 «REST 수집 옵션 묶음» 으로 ㄱ-3 GitHub 기록(S4)의 옵션 둘(기록 가지 이름 · 전달 글롭)도 collectRestObservations 에 간다
+    // (이름은 옛 gate4Options 그대로 -- runPartialCountOnce 줄 수 예산 때문). `??` 를 쓰지 않는 직접 읽기라 resolveValueOptions 복잡도 무변 ·
+    // 값이 없으면(undefined) 수집기를 부르지 않는다(opt-in · 회귀 0).
     gate4Options: {
       maxMergeChecks: options.maxMergeChecks ?? DEFAULT_MAX_MERGE_CHECKS,
       approvalCachePath: resolveApprovalCachePath(options),
+      gate3RecordBase: options.gate3RecordBase,
+      relayGlob: options.relayGlob,
     },
     maxExternalEvidenceChecks:
       options.maxExternalEvidenceChecks ?? DEFAULT_MAX_EXTERNAL_EVIDENCE_CHECKS,
@@ -3926,10 +4248,13 @@ function assemblePartialCountReportText({
   // HYK-255-p2b-qual-1 -- 같은 결과 묶음이 «1-C 판정 자격» 줄(부분 있음일 때만) · 종류 설정 진단 줄(읽기 실패일 때만)도 싣는다(없으면 지금 문면 그대로).
   machineScope = {},
 }) {
-  const { outboxResult, relayResult, gateAux, permissionResult } = aux;
+  const { outboxResult, relayResult, gateAux, permissionResult, gate3Record } =
+    aux;
   return buildPartialCountReport({
     permissionAnswers: permissionResult ?? undefined,
     githubHumanActions,
+    // HYK-255-g3-record-1 -- ㄱ-3 GitHub 기록(aux 묶음 안 · 없으면 undefined = 새 줄 0개).
+    gate3Record: gate3Record ?? undefined,
     confirmedZeroStreakLine,
     machineScopeLine: machineScope.machineScopeLine,
     qualificationLine: machineScope.qualificationLine,
@@ -3962,6 +4287,7 @@ function assemblePartialCountReportText({
       gateAux,
       permissionResult,
       githubHumanActions,
+      gate3Record,
     }),
     lastAliveMs: watch.lastAliveMs,
     coverageGaps: watch.coverageGaps,
@@ -4065,6 +4391,7 @@ async function collectPartialCountInputs({
     maxExternalEvidenceChecks,
     watchLogPath,
     readFn,
+    readdirFn,
   });
   return { deliveredResult, consumedResult, watch, ...rest };
 }
@@ -4084,6 +4411,9 @@ async function collectRestObservations({
   maxExternalEvidenceChecks,
   watchLogPath,
   readFn,
+  readdirFn,
+  gate3RecordBase,
+  relayGlob,
 }) {
   const meter = meterFetchJson(rawFetchJson);
   const fetchJson = meter.fetchJson;
@@ -4129,7 +4459,24 @@ async function collectRestObservations({
           }
         : null,
   });
-  return { gate4, externalEvidence, githubHumanActions };
+  // HYK-255-g3-record-1 -- ㄱ-3 GitHub 기록(S4): opt-in(gate3RecordBase 없으면 호출 0 · 줄 0개). 호출 순서 = ㄱ-4 · D1 · P3 · S4 -- S4 몫 =
+  // min(2, 12 - 앞 셋이 이 회차에 쓴 호출 수)(P3 몫을 빼앗지 않는다 · 회차 천장 12 무변).
+  const gate3Record = gate3RecordBase
+    ? await collectGate3RecordSafely({
+        fetchJson,
+        git,
+        allowlistPath,
+        botAccountsPath: githubBotAccountsPath,
+        windowStartMs,
+        windowEndMs,
+        budget: githubHumanBudget(meter.calls()),
+        recordBase: gate3RecordBase,
+        relayGlob,
+        readdirFn,
+        readFn,
+      })
+    : null;
+  return { gate4, externalEvidence, githubHumanActions, gate3Record };
 }
 
 // HYK-255-relay-aux-1 -- runPartialCountOnce 본문이 relayResult 한 줄
@@ -4257,7 +4604,8 @@ export async function runPartialCountOnce(options = {}) {
     windowStartMs,
     windowEndMs,
     ...inputs,
-    aux,
+    // HYK-255-g3-record-1 -- ㄱ-3 기록 결과는 보조 묶음(aux)에 실어 조립으로 넘긴다(opt-in 아니면 null).
+    aux: { ...aux, gate3Record: inputs.gate3Record },
     confirmedZeroStreakLine: options.confirmedZeroStreakLine,
     machineScope: await resolveMachineScope({
       dailyLines: options.machineScopeDailyLines,
@@ -4376,9 +4724,14 @@ const CLI_FLAG_HANDLERS = Object.freeze({
   "--inbox-dir": (opts, v) => {
     opts.inboxDir = v;
   },
+  // HYK-255-g3-record-1 -- ㄱ-3 GitHub 기록 수집(S4)의 기록 가지 이름(보통 gate3-record). 기본값 없음(opt-in) -- 생략하면 수집기를 부르지 않는다(회귀 0).
+  "--gate3-record-base": (opts, v) => {
+    opts.gate3RecordBase = v;
+  },
 });
 
-function parseCliArgs(argv) {
+// HYK-255-g3-record-1 -- export 는 시험이 실제 인자 해석을 구동하려는 것(기능 변화 0).
+export function parseCliArgs(argv) {
   const opts = {};
   for (let i = 0; i < argv.length; i++) {
     const handler = CLI_FLAG_HANDLERS[argv[i]];
