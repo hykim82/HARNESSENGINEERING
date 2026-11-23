@@ -781,6 +781,10 @@ test("T-F 설정 3행(예방 1 · 부분 1 · 정의상 제외 1): 선언문 절
   assert.ok(outAt !== -1 && defAt > outAt && proofAt > defAt, "세 칸 순서");
   assert.ok(lines[outAt].includes("1개"), lines[outAt]);
   assert.ok(lines[outAt].includes("하한"), "열린 집합 낱말");
+  assert.ok(
+    lines[outAt].includes("(위 1개는 하한)"),
+    `하한 괄호 문면(수 뒤 조사 «은» 오류 없이 «개는») -- ${lines[outAt]}`,
+  );
   const outside = lines.slice(outAt + 1, defAt);
   assert.deepEqual(
     outside.map((l) => l.trim()),

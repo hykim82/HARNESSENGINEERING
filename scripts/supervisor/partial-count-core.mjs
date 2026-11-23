@@ -1823,7 +1823,7 @@ export function renderDeclarationScopeLines({ qualification, kinds } = {}) {
   return [
     "선언문 범위 시안(종류 설정 파일에서 읽음 · 이 절을 선언 PR 본문에 그대로 옮긴다):",
     `- 기간: 달력 ${qualification.fromDay}~${qualification.toDay} · 일한 날 ${qualification.days}일${skipNote}`,
-    `- 기계로 못 세는 알려진 종류 ${outside.length}개는 이 선언의 범위 밖이다(영구 부분). 목록에 없는 개입도 있을 수 있다(${outside.length} 은 하한):`,
+    `- 기계로 못 세는 알려진 종류 ${outside.length}개는 이 선언의 범위 밖이다(영구 부분). 목록에 없는 개입도 있을 수 있다(위 ${outside.length}개는 하한):`,
     ...outside.map((k) => `  · ${plainRow(k)}`),
     `- 정의상 개입이 아닌 것:${defined.length === 0 ? " 없음" : ""}`,
     ...defined.flatMap((k) => [`  · ${plainRow(k)}`, `    ${k.plainLimit}`]),
