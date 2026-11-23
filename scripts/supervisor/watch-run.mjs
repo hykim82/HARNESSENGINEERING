@@ -75,7 +75,10 @@ import { runReachOnce, DEFAULT_NOTIFY_DIR } from "./reach-report.mjs";
 // HYK-255-watch-wire-1 (coder-task.md §1) -- 부분 계수 보고 «실파일» 생성을
 // 감시 실행에 잇는다. 계수 로직은 새로 쓰지 않는다 -- 병합된 프로덕션 API
 // (runPartialCountOnce)를 그대로 호출해 그 출력을 파일로 쓸 뿐이다.
-import { runPartialCountOnce } from "./partial-count-report.mjs";
+import {
+  runPartialCountOnce,
+  GATE3_RECORD_BASE,
+} from "./partial-count-report.mjs";
 // HYK-255-p1-daily-1 -- 일별 마감 줄(순수 함수들 · 이미 partial-count-report 가 import 하는 같은 모듈이라
 // 새 파일 의존 0 -- 설치 목록 변경 불필요).
 import {
@@ -3406,8 +3409,14 @@ export function buildPartialCountStepOptions({
   relayGlob,
   inboxDir,
   gate3RecordBase,
+  gate3RecordSwitch,
   linearBindingSwitch,
 }) {
+  // HYK-255-g3-record-flag-1 -- 기록 가지 = 수동 인자 값이 있으면 그 값(인자가 앞선다) · 아니면 표지 켜짐일 때 «코드 상수» GATE3_RECORD_BASE(표지 내용의 다른 키는 읽지 않는다).
+  // gate3RecordSwitch({on, reason})도 «값이 있을 때만»: 상태(gate3RecordStatus)는 켜짐/꺼짐 모두 싣는다(매 회차 줄) · 안 주면 옛 옵션 모양 그대로.
+  const recordBase =
+    gate3RecordBase ||
+    (gate3RecordSwitch?.on === true ? GATE3_RECORD_BASE : null);
   // HYK-255-g3-record-1 -- gate3RecordBase 는 «값이 있을 때만» 키를 싣는다(opt-in · 안 준 호출자는 옛 옵션 모양 그대로 = 회귀 0).
   // HYK-255-linear-binding-1 -- linearBindingSwitch({on, reason})도 «값이 있을 때만»: 상태는 켜짐/꺼짐 모두 싣고(매 회차 줄) 수집 옵션(linearBinding)은 켜짐일 때만 싣는다.
   return {
@@ -3416,7 +3425,15 @@ export function buildPartialCountStepOptions({
     outboxDir,
     relayGlob,
     inboxDir,
-    ...(gate3RecordBase ? { gate3RecordBase } : {}),
+    ...(recordBase ? { gate3RecordBase: recordBase } : {}),
+    ...(gate3RecordSwitch
+      ? {
+          gate3RecordStatus: {
+            on: gate3RecordSwitch.on === true,
+            reason: gate3RecordSwitch.reason,
+          },
+        }
+      : {}),
     ...(linearBindingSwitch
       ? {
           ...(linearBindingSwitch.on === true ? { linearBinding: true } : {}),
@@ -3488,6 +3505,14 @@ export async function runWatchCliPartialCountStep({
     existsFn,
     readFn,
   });
+  // HYK-255-g3-record-flag-1 -- ㄱ-3 GitHub 기록 수집도 같은 꼴: 수동 인자(--gate3-record-base)가 있으면 그것(ARG_BASE) · 아니면 표지(감시 폴더 gate3-record.json) 판정.
+  // 켜짐/꺼짐 어느 쪽이든 상태가 보고서에 실린다. linear-binding.json 과는 서로 읽지 않는다(독립).
+  const gate3RecordSwitch = resolveGate3RecordSwitch({
+    argBase: gate3RecordBase,
+    watchDir,
+    existsFn,
+    readFn,
+  });
   const stepFn =
     runPartialCountStepFn === undefined
       ? runPartialCountStep
@@ -3505,6 +3530,7 @@ export async function runWatchCliPartialCountStep({
       relayGlob,
       inboxDir,
       gate3RecordBase,
+      gate3RecordSwitch,
       linearBindingSwitch,
     }),
   });
@@ -4828,6 +4854,103 @@ export function resolveLinearBindingSwitch({
 }) {
   if (argOn === true) return { on: true, reason: LINEAR_BINDING_ARG_ON_REASON };
   return judgeLinearBindingFlag({ watchDir, existsFn, readFn });
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// HYK-255-g3-record-flag-1 (판정 #20261124-0728 · 판정 #20261123-2305 의 복제) -- ㄱ-3 GitHub 기록 수집(B1 · S4)의 켜기 표지.
+// 위 linear-binding.json 판정과 «같은 꼴 · 따로 둔 복제»(공용 도우미로 뽑지 않는다 -- 복제가 정본 · 두 표지는 서로 독립). 감시 폴더 안 gate3-record.json -- 이 코드는 그 파일을 만들거나
+// 지우지 않는다(만들고 지우는 건 병합 뒤 책임자 켜기 판정 때 ORCH 가 한다). 켜짐 = 내용이 **JSON 객체이고 `enabled` 가 정확히 불리언 `true`** 일 때뿐 -- 없음 · 빈 파일 · 깨진 JSON · 폴더 ·
+// 배열 · 문자열 · 숫자 · 불리언/null 최상위 · enabled 키 없음 · enabled 가 true 가 아닌 값(false · "true" · 1 …)은 전부 꺼짐이고 사유 토큰이 경우마다 다르다(켜짐은 오직 위 한 조건).
+// 켜졌을 때 기록 가지 이름 = 코드 상수 GATE3_RECORD_BASE(buildPartialCountStepOptions 가 싣는다) -- 표지 내용의 다른 키로 가지 이름을 바꾸는 길은 없다. 수동 인자 `--gate3-record-base <값>` 은
+// 그대로이고 표지보다 앞선다(사유 토큰 = GATE3_RECORD_ARG_BASE). 감시 회차 보고서는 켜짐/꺼짐 + 사유 토큰을 «매 회차» 한 줄 싣는다. 새 코드는 보고 줄만 만든다 -- 차단 0.
+// ---------------------------------------------------------------------------
+export const GATE3_RECORD_FLAG_FILENAME = "gate3-record.json";
+
+export const GATE3_RECORD_FLAG_REASON = Object.freeze({
+  ENABLED: "GATE3_RECORD_FLAG_ENABLED",
+  ABSENT: "GATE3_RECORD_FLAG_ABSENT",
+  IS_DIRECTORY: "GATE3_RECORD_FLAG_IS_DIRECTORY",
+  EMPTY: "GATE3_RECORD_FLAG_EMPTY",
+  NOT_JSON: "GATE3_RECORD_FLAG_NOT_JSON",
+  VALUE_IS_ARRAY: "GATE3_RECORD_FLAG_VALUE_IS_ARRAY",
+  VALUE_IS_STRING: "GATE3_RECORD_FLAG_VALUE_IS_STRING",
+  VALUE_IS_NUMBER: "GATE3_RECORD_FLAG_VALUE_IS_NUMBER",
+  NOT_OBJECT: "GATE3_RECORD_FLAG_NOT_OBJECT",
+  ENABLED_KEY_MISSING: "GATE3_RECORD_FLAG_ENABLED_KEY_MISSING",
+  ENABLED_NOT_TRUE: "GATE3_RECORD_FLAG_ENABLED_NOT_TRUE",
+  READ_FAILED: "GATE3_RECORD_FLAG_READ_FAILED",
+});
+// 수동 인자 `--gate3-record-base <값>` 으로 켠 회차의 사유 토큰(표지 판정과 별개 -- 인자가 표지보다 앞선다).
+export const GATE3_RECORD_ARG_BASE_REASON = "GATE3_RECORD_ARG_BASE";
+
+// 존재 · 읽기 단계(fail-closed). 빈 값(없음 · 폴더 · 읽기 실패 · 빈 파일)이면 여기서 끝난다.
+function readGate3RecordFlagRaw({ watchDir, existsFn, readFn }) {
+  const R = GATE3_RECORD_FLAG_REASON;
+  if (
+    !isNonEmptyString(watchDir) ||
+    typeof existsFn !== "function" ||
+    typeof readFn !== "function"
+  )
+    return { ok: false, reason: R.ABSENT };
+  const flagPath = path.join(watchDir, GATE3_RECORD_FLAG_FILENAME);
+  let exists;
+  try {
+    exists = existsFn(flagPath) === true;
+  } catch {
+    return { ok: false, reason: R.ABSENT };
+  }
+  if (!exists) return { ok: false, reason: R.ABSENT };
+  let raw;
+  try {
+    raw = readFn(flagPath, "utf8");
+  } catch (err) {
+    return {
+      ok: false,
+      reason: err && err.code === "EISDIR" ? R.IS_DIRECTORY : R.READ_FAILED,
+    };
+  }
+  if (typeof raw !== "string" || raw.trim() === "")
+    return { ok: false, reason: R.EMPTY };
+  return { ok: true, raw };
+}
+
+// 이미 JSON.parse 된 값의 «모양» 분류. null = 켜짐 조건 통과(JSON 객체 ∧ enabled === true).
+function classifyGate3RecordFlagValue(parsed) {
+  const R = GATE3_RECORD_FLAG_REASON;
+  if (Array.isArray(parsed)) return R.VALUE_IS_ARRAY;
+  if (typeof parsed === "string") return R.VALUE_IS_STRING;
+  if (typeof parsed === "number") return R.VALUE_IS_NUMBER;
+  if (parsed === null || typeof parsed !== "object") return R.NOT_OBJECT;
+  if (!Object.prototype.hasOwnProperty.call(parsed, "enabled"))
+    return R.ENABLED_KEY_MISSING;
+  if (parsed.enabled !== true) return R.ENABLED_NOT_TRUE;
+  return null;
+}
+
+// 표지 판정 -> {on, reason}. 던지지 않는다.
+export function judgeGate3RecordFlag({ watchDir, existsFn, readFn }) {
+  const read = readGate3RecordFlagRaw({ watchDir, existsFn, readFn });
+  if (!read.ok) return { on: false, reason: read.reason };
+  let parsed;
+  try {
+    parsed = JSON.parse(read.raw);
+  } catch {
+    return { on: false, reason: GATE3_RECORD_FLAG_REASON.NOT_JSON };
+  }
+  const bad = classifyGate3RecordFlagValue(parsed);
+  if (bad) return { on: false, reason: bad };
+  return { on: true, reason: GATE3_RECORD_FLAG_REASON.ENABLED };
+}
+
+// 감시 회차의 스위치 = 수동 인자(--gate3-record-base 의 값이 있음)가 있으면 그것(ARG_BASE) · 아니면 표지 판정.
+export function resolveGate3RecordSwitch({
+  argBase,
+  watchDir,
+  existsFn,
+  readFn,
+}) {
+  if (argBase) return { on: true, reason: GATE3_RECORD_ARG_BASE_REASON };
+  return judgeGate3RecordFlag({ watchDir, existsFn, readFn });
 }
 
 // 워크트리가 지워진 «뒤»에도 쓸 수 있어야 한다(cwd=worktreePath는 그

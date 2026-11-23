@@ -46,6 +46,8 @@ test("runWatchCliPartialCountStep: argv의 --outbox-dir가 실제로 options.out
     inboxDir: null,
     // HYK-255-linear-binding-1 -- 감시 회차는 매 회차 Linear 결속 확인 켜짐/꺼짐 상태를 싣는다(표지 파일 없음 = 꺼짐 · 사유 ABSENT). 이 줄 1개 추가가 유일한 뜻 변화다.
     linearBindingStatus: { on: false, reason: "LINEAR_BINDING_FLAG_ABSENT" },
+    // HYK-255-g3-record-flag-1 -- 같은 꼴로 ㄱ-3 GitHub 기록 수집 켜짐/꺼짐 상태도 매 회차 싣는다(표지 파일 없음 = 꺼짐 · 사유 ABSENT). 이 줄 1개 추가가 유일한 뜻 변화다.
+    gate3RecordStatus: { on: false, reason: "GATE3_RECORD_FLAG_ABSENT" },
   });
 });
 
