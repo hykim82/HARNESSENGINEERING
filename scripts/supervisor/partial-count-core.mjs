@@ -437,6 +437,18 @@ export function renderGate3RecordLines(g) {
   ];
 }
 
+// HYK-255-g3-record-flag-1 (판정 #20261124-0728) -- ㄱ-3 «GitHub 기록 수집» 켜짐/꺼짐 한 줄. 입력 = {on, reason} -- 감시 회차가 표지(gate3-record.json) 또는 수동 인자 판정 결과를 싣는다
+// (매 회차 «켜짐/꺼짐 + 사유 토큰» 한 줄 · 꺼진 채 조용히 지나가지 않게). 입력이 없으면(보고 CLI 를 인자 없이 직접 부른 경우 · 옛 호출자) 줄 0개.
+// on 이 정확히 true 일 때만 «켜짐» 이고 그 밖은 «꺼짐». 기록 수 · 커버리지 · 독립 확인 수 어디에도 닿지 않는 순수 렌더(던지지 않고 아무것도 쓰지 않는다).
+const GATE3_RECORD_STATUS_LABEL = "- ㄱ-3 GitHub 기록 수집";
+
+export function renderGate3RecordStatusLines(status) {
+  if (!status) return [];
+  return [
+    `${GATE3_RECORD_STATUS_LABEL} ${status.on === true ? "켜짐" : "꺼짐"}(${status.reason})`,
+  ];
+}
+
 // HYK-255-linear-binding-1 (전달 #20261123-1740 확정 4 · 판정 #20261123-2305) -- ㄱ-4 «Linear Done 결속 확인» 줄. 입력 = {status, result}:
 //   status = {on, reason} -- 감시 회차가 표지 판정 결과를 싣는다(매 회차 «켜짐/꺼짐 + 사유 토큰» 한 줄 · 꺼진 채 조용히 지나가지 않게).
 //   result = wire 의 collectLinearDoneBinding 결과 {known:true, …counts} | {known:false, reason} -- 켠 회차에만 있다.
@@ -515,9 +527,9 @@ function buildGate4CacheLines(gate4) {
   return lines;
 }
 
-// gateExtras = {gate3Record, linearBinding} -- 둘 다 «별개 입력»(커버리지 · 확인 수에 더하지 않는다 · 없으면 줄 0개).
+// gateExtras = {gate3Record, gate3RecordStatus, linearBinding} -- 셋 다 «별개 입력»(커버리지 · 확인 수에 더하지 않는다 · 없으면 줄 0개).
 function buildGaSection(gate4, auxNote, gateAux, gateExtras = {}) {
-  const { gate3Record, linearBinding } = gateExtras;
+  const { gate3Record, gate3RecordStatus, linearBinding } = gateExtras;
   const lines = ["ㄱ 설계된 정지:"];
   if (gate4.known === true) {
     lines.push(
@@ -538,6 +550,8 @@ function buildGaSection(gate4, auxNote, gateAux, gateExtras = {}) {
   } else {
     lines.push(`- 외부 독립 앵커로 확인: UNKNOWN(${gate4.reason})`);
   }
+  // HYK-255-g3-record-flag-1 -- ㄱ-3 GitHub 기록 수집 켜짐/꺼짐(+사유 토큰) 한 줄: ㄱ-3 GitHub 기록 줄 «바로 앞» · 감시 회차만(입력이 없으면 줄 0개).
+  lines.push(...renderGate3RecordStatusLines(gate3RecordStatus));
   // HYK-255-g3-record-1 -- ㄱ-3 GitHub 기록(별도 줄 · G4 ⓐ): 입력이 없으면 줄 0개 · 커버리지 두 줄은 아래에서 그대로.
   lines.push(...renderGate3RecordLines(gate3Record));
   // HYK-255-linear-binding-1 -- Linear Done 결속 확인(ㄱ-3 줄 뒤 · 보조 관측 앞 · 커버리지 두 줄 무변): 입력이 없으면 줄 0개.
@@ -857,6 +871,8 @@ export function buildPartialCountReport({
   // HYK-255-g3-record-1 -- 기본값 undefined -> ㄱ 절 새 줄 0개(미결선 호출자 회귀 0). 값 = wire 의 collectGate3Record 결과(독립 확인 · 미조회 · UNKNOWN).
   // 커버리지 상수 · ㄱ-4 확인 수와 «별개 입력» -- 둘 어디에도 더하지 않는다.
   gate3Record,
+  // HYK-255-g3-record-flag-1 -- 기본값 undefined -> ㄱ 절 새 줄 0개(보고 CLI 직접 호출 · 옛 호출자 회귀 0). 값 = {on, reason}(감시 회차의 표지/인자 판정) -- 보고 줄만 만든다(차단 0 · 커버리지 · 확인 수 무관).
+  gate3RecordStatus,
   // HYK-255-linear-binding-1 -- ㄱ 절 «Linear Done 결속 확인» 입력 {status, result}(기본 undefined = 새 줄 0개 · 커버리지 · 확인 수 · ㄴ 분자에 더하지 않는다).
   linearBinding,
 }) {
@@ -891,12 +907,9 @@ export function buildPartialCountReport({
     "(기준 단위: 배달·소비 = 레코드 수 · 영수증 결손 = 영수증 없는 고유 라벨 수 — 단위가 달라 «배달−소비=결손»이 성립하지 않음)",
   );
   lines.push("");
-  lines.push(
-    ...buildGaSection(gate4, auxNote, gateAuxObservation, {
-      gate3Record,
-      linearBinding,
-    }),
-  );
+  // HYK-255-g3-record-flag-1 -- 별개 입력 셋을 한 객체로 묶어 넘긴다(eslint max-lines-per-function 예산 -- 값 · 순서 무변).
+  const gateExtras = { gate3Record, gate3RecordStatus, linearBinding };
+  lines.push(...buildGaSection(gate4, auxNote, gateAuxObservation, gateExtras));
   lines.push("");
   lines.push(
     ...buildLnSection(

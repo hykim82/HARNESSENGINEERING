@@ -4296,6 +4296,7 @@ function assemblePartialCountReportText({
     gateAux,
     permissionResult,
     gate3Record,
+    gate3RecordStatus,
     linearBinding,
   } = aux;
   return buildPartialCountReport({
@@ -4303,6 +4304,8 @@ function assemblePartialCountReportText({
     githubHumanActions,
     // HYK-255-g3-record-1 -- ㄱ-3 GitHub 기록(aux 묶음 안 · 없으면 undefined = 새 줄 0개).
     gate3Record: gate3Record ?? undefined,
+    // HYK-255-g3-record-flag-1 -- ㄱ-3 기록 수집 켜짐/꺼짐 + 사유 토큰(감시 회차만 · 없으면 undefined = 새 줄 0개 · 커버리지 · 확인 수 무관).
+    gate3RecordStatus,
     // HYK-255-linear-binding-1 -- Linear Done 결속 확인(aux 묶음 안 · 없으면 undefined = 새 줄 0개 · 커버리지 · 확인 수 무관).
     linearBinding: linearBinding ?? undefined,
     confirmedZeroStreakLine,
@@ -4690,7 +4693,7 @@ export async function runPartialCountOnce(options = {}) {
     windowEndMs,
     ...inputs,
     // HYK-255-g3-record-1 -- ㄱ-3 기록 결과는 보조 묶음(aux)에 실어 조립으로 넘긴다(opt-in 아니면 null).
-    aux: withGateExtras(aux, inputs),
+    aux: withGateExtras(aux, inputs, options.gate3RecordStatus),
     confirmedZeroStreakLine: options.confirmedZeroStreakLine,
     machineScope: await resolveMachineScope({
       dailyLines: options.machineScopeDailyLines,
@@ -4703,10 +4706,12 @@ export async function runPartialCountOnce(options = {}) {
 }
 
 // HYK-255-linear-binding-1 -- 보조 묶음(aux)에 ㄱ-3 기록(B1) · Linear 결속 확인(B2) 결과를 싣는다(opt-in 이 아니면 null · runPartialCountOnce 줄 수 예산 때문에 떼어냈다).
-function withGateExtras(aux, inputs) {
+// HYK-255-g3-record-flag-1 -- 세 번째 인자 = 감시 회차의 ㄱ-3 기록 수집 상태({on, reason} · 감시 회차만 준다 · 없으면 undefined = 새 줄 0개). 보고 줄만 만든다 -- 수집 · 수집 건강 행 · 일별 값에 닿지 않는다(차단 0).
+function withGateExtras(aux, inputs, gate3RecordStatus) {
   return {
     ...aux,
     gate3Record: inputs.gate3Record,
+    gate3RecordStatus: gate3RecordStatus ?? undefined,
     linearBinding: inputs.linearBinding,
   };
 }
