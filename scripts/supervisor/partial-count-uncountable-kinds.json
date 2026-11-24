@@ -1,93 +1,109 @@
 {
-  "schema_version": "partial-count-uncountable-kinds/v1",
+  "schema_version": "partial-count-uncountable-kinds/v2",
   "kinds": [
     {
       "id": "k01",
       "name": "전달 파일 밖 채팅 지시",
+      "plain": "작업 지시서 말고 채팅으로 ORCH 에게 직접 일을 시킨 것",
       "handling": "partial-scope",
       "source": "P4:30 · P5 설계:62-71 · partial-count-core.mjs:124"
     },
     {
       "id": "k02",
       "name": "빈 Enter 밀기",
+      "plain": "작업 창에 붙기만 하고 시작 안 된 일을 사람이 Enter 로 출발시킨 것",
       "handling": "partial-scope",
       "source": "P4:32 · partial-count-core.mjs:126"
     },
     {
       "id": "k03",
       "name": "멈춘 좌석 깨우기",
+      "plain": "멈춘 작업 창을 사람이 알아채고 다시 움직이게 한 것",
       "handling": "partial-scope",
       "source": "P4:33 · partial-count-core.mjs:127"
     },
     {
       "id": "k04",
       "name": "끝난 배달 손 닫기",
+      "plain": "끝난 작업 기록을 사람이 손으로 닫아 준 것",
       "handling": "partial-scope",
       "source": "P4:34 · partial-count-core.mjs:128"
     },
     {
       "id": "k05",
       "name": "로그 경보 사람 발견·알림",
+      "plain": "기계 로그에만 뜬 경고를 사람이 보고 알려 준 것",
       "handling": "partial-scope",
       "source": "P4:35 · partial-count-core.mjs:129"
     },
     {
       "id": "k06",
       "name": "Linear 상태 전환(Done 밖)",
+      "plain": "Linear 이슈 상태를 사람이 손으로 바꾼 것(완료 처리 말고)",
       "handling": "partial-scope",
       "source": "P4:36 · partial-count-core.mjs:130 · 배달 규칙 §3"
     },
     {
       "id": "k07",
       "name": "CI 재실행 버튼",
+      "plain": "GitHub 자동 검사가 실패했을 때 사람이 «다시 실행» 을 누른 것",
       "handling": "partial-scope",
       "source": "partial-count-report.mjs:1045-1046"
     },
     {
       "id": "k08",
       "name": "웹 화면만 본 행위(로그 읽기 등)",
-      "handling": "excluded-by-definition-provisional",
+      "plain": "화면을 보기만 한 것은 개입으로 세지 않는다",
+      "plainLimit": "못 덮는 경우: 보고 나서 한 판단은 채팅 지시 등 다른 종류로 센다",
+      "handling": "excluded-by-definition",
       "source": "partial-count-report.mjs:1045 · partial-count-core.mjs:2432"
     },
     {
       "id": "k09",
       "name": "미병합 닫기 행위자 불명",
+      "plain": "병합 안 된 PR 을 누가 닫았는지 기계가 못 가리는 것(지금은 전부 사람 손으로 세서 많게 나옴)",
       "handling": "partial-scope",
       "source": "partial-count-core.mjs:2071-2072 · partial-count-report.mjs:1037"
     },
     {
       "id": "k10",
       "name": "세션 기록 삭제 가능성",
+      "plain": "확인창 답을 세는 근거인 대화 기록 파일이 지워지면 그 답을 못 셈",
       "handling": "partial-scope",
       "source": "partial-count-report.mjs:2483 · P5 설계:95"
     },
     {
       "id": "k11",
       "name": "codex 좌석 미포함",
+      "plain": "codex 엔진 작업 창은 확인창 답을 세지 않음(확인창이 안 뜨게 띄움)",
       "handling": "partial-scope",
       "source": "partial-count-report.mjs:2480 · P5 설계:93"
     },
     {
       "id": "k12",
       "name": "좌석 질문창에 사람이 답함",
+      "plain": "작업 창이 띄운 질문 상자에 사람이 직접 답한 것",
       "handling": "partial-scope",
       "source": "worker-dispatch-rule.md:87"
     },
     {
       "id": "k13",
       "name": "통역 세션에 친 말",
+      "plain": "통역 대화창에 친 말이 계획 밖 지시인지 기계가 못 가름",
       "handling": "partial-scope",
       "source": "P5 설계:72 · P5 근거-부록:61"
     },
     {
       "id": "k14",
       "name": "사람 로컬 git 조작(커밋·push)",
+      "plain": "사람이 자기 PC 에서 직접 커밋·push 한 것(봇과 같은 계정이라 구별 안 됨)",
       "handling": "partial-scope",
       "source": "11-12 진단 근거-부록:55"
     },
     {
       "id": "k15",
       "name": "PC 위 직접 손 조작(관제실·설정 파일 손 편집 · Orca/감시 재시작 · 좌석 손 기동)",
+      "plain": "PC 에서 설정 파일 손 편집 · Orca·감시 재시작 · 작업 창 손 기동",
       "handling": "partial-scope",
       "source": "북극성:113 · P4:18"
     }

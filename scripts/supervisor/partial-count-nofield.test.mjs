@@ -70,7 +70,7 @@ const KINDS = [
   {
     id: "x2",
     name: "합성 종류 2",
-    handling: "excluded-by-definition-provisional",
+    handling: "excluded-by-definition",
   },
 ];
 
@@ -230,7 +230,7 @@ test("⑨ 일별 파일(mkdtemp 합성 · 11-14 꼴 + 11-15 꼴) -> parseDailyLi
   assert.deepEqual(scope.lastBreak.reasons, [NO_GITHUB]);
   const scopeLine = core.renderMachineScopeLine(scope);
   assert.ok(
-    scopeLine.startsWith("기계 계수 범위 기준: 미충족 — 연속 0일"),
+    scopeLine.startsWith("기계 계수 범위 기준: 미충족 — 일한 날 0일"),
     scopeLine,
   );
   assert.ok(

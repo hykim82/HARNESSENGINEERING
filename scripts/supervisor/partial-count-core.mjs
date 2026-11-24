@@ -377,6 +377,95 @@ export function renderGateAuxObservationLine(gateAux) {
   );
 }
 
+// HYK-255-g3-record-1 (전달 #20261123-1740 확정 2 · 판정 #20261123-1905 G1 ⓐ · G4 ⓐ) -- ㄱ-3 «GitHub 기록» 줄. 한용이 전용 기록 가지
+// (gate3-record)의 결정 PR 을 Merge 한 사건을 수집기(wire 의 collectGate3Record)가 센 값을 줄로 바꾼다. 기록만 · 차단 0 · 커버리지 분자 · 분모에
+// 들어가지 않는다(INDEPENDENT_ANCHOR_COVERED_GATE_NUMBERS 는 이 함수가 읽지 않는다 · buildGaSection 의 커버리지 두 줄 무변).
+// 입력 없음(null · undefined = 미결선 호출자) = 줄 0개. 미조회(예산 · rate limit) · 수집 실패는 0 으로 접지 않고 «0 아님» 으로 쓴다.
+// 이 함수는 던지지 않고 아무것도 쓰지 않는다(순수 렌더).
+const GATE3_RECORD_LABEL = "- ㄱ-3 GitHub 기록";
+
+function renderGate3EventLine(ev) {
+  // 병합 시각 «MM-DD HH:MM KST» -- formatKst(KST 고정 · 실행 환경 TZ 무관)의 월일 시분만 쓴다.
+  const at = Number.isFinite(ev.mergedAtMs)
+    ? `${formatKst(ev.mergedAtMs).slice(5, 16)} KST`
+    : "시각 불명";
+  return `  · 확인 사건: PR#${ev.pullNumber} #${ev.number} 병합자 ${ev.mergedBy} ${at}`;
+}
+
+function renderGate3RelayCrossLine(cross) {
+  const label = "  · 전달 ㄱ-3 분류(자기 분류 · 독립 아님)";
+  if (!cross || cross.wired !== true)
+    return `${label}: 교차 미결선(--relay-glob 없음)`;
+  if (cross.known !== true)
+    return `${label}: UNKNOWN(${cross.reason ?? "사유 미상"}) — 0 아님`;
+  const readFail =
+    cross.readFailures > 0
+      ? ` · 전달 파일 읽기 실패 ${cross.readFailures}건(0 아님)`
+      : "";
+  return (
+    `${label} ${cross.total}건 중 기록 짝 ${cross.paired} · 짝 없음 ${cross.total - cross.paired}` +
+    ` · 전달 없는 기록 ${cross.recordsWithoutRelay}${readFail}`
+  );
+}
+
+export function renderGate3RecordLines(g) {
+  if (!g) return [];
+  if (g.known !== true) {
+    return g.unchecked === true
+      ? [`${GATE3_RECORD_LABEL}: 미조회(${g.reason} · 0 아님)`]
+      : [`${GATE3_RECORD_LABEL}: UNKNOWN(${g.reason}) — 0 아님`];
+  }
+  const invalid =
+    g.invalidNotAllowlisted + g.invalidBotOrAuthor + g.invalidShape;
+  const u = g.unresolved;
+  const unresolvedTotal = u.budget + u.failed + u.rateLimited;
+  const unresolved =
+    unresolvedTotal > 0
+      ? ` · 상세 미확정 ${unresolvedTotal}(예산 ${u.budget} · 조회 실패 ${u.failed} · rate limit ${u.rateLimited}) — 0 아님`
+      : "";
+  const dup =
+    g.duplicates > 0
+      ? ` · 같은 번호 중복 병합 ${g.duplicates}(1사건으로만 셈)`
+      : "";
+  return [
+    `${GATE3_RECORD_LABEL}(한용 Merge · 기록만 · 차단 0): 독립 확인 ${g.confirmed}건` +
+      ` · 대기(열림) ${g.open} · 무효 ${invalid}(병합자 명단 밖 ${g.invalidNotAllowlisted}` +
+      ` · 봇·작성자 병합 ${g.invalidBotOrAuthor} · 모양 위반 ${g.invalidShape})` +
+      ` · 닫힘(미병합) ${g.closedUnmerged} · 이번 회차 조회 ${g.calls}${dup}${unresolved}`,
+    renderGate3RelayCrossLine(g.relayCross),
+    ...g.events.map(renderGate3EventLine),
+  ];
+}
+
+// HYK-255-linear-binding-1 (전달 #20261123-1740 확정 4 · 판정 #20261123-2305) -- ㄱ-4 «Linear Done 결속 확인» 줄. 입력 = {status, result}:
+//   status = {on, reason} -- 감시 회차가 표지 판정 결과를 싣는다(매 회차 «켜짐/꺼짐 + 사유 토큰» 한 줄 · 꺼진 채 조용히 지나가지 않게).
+//   result = wire 의 collectLinearDoneBinding 결과 {known:true, …counts} | {known:false, reason} -- 켠 회차에만 있다.
+// 둘 다 없으면(옛 호출자 · 수동 CLI 인자 없음) 줄 0개. 결속 확인이지 독립 증거가 아니다(문면 고정) -- 커버리지 · 독립 확인 수 · ㄴ 분자에 어떤 값도 더하지 않는다
+// (이 함수는 커버리지 상수를 읽지 않는 순수 렌더 · 던지지 않고 아무것도 쓰지 않는다). 모르면(UNKNOWN) 0 으로 접지 않는다.
+const LINEAR_BINDING_LABEL = "- ㄱ-4 Linear Done 결속 확인";
+
+function renderLinearBindingResultLine(r) {
+  if (r.known !== true)
+    return `${LINEAR_BINDING_LABEL}: UNKNOWN(${r.reason ?? "사유 미상"}) — 0 아님`;
+  return (
+    `${LINEAR_BINDING_LABEL}(결속 확인 · 독립 아님): Done ${r.total}건 중 결속 ${r.bound}` +
+    ` · 미결속 ${r.unbound}(승인 아님 ${r.unboundNotApproved} · PR 연결 없음 ${r.unboundNoPr})` +
+    ` · 미조회 ${r.unchecked} · 행위자 = 기계 키 주인과 같은 계정 ${r.sameActor}/${r.total}` +
+    " — Linear 행위자는 근거가 아니다"
+  );
+}
+
+export function renderLinearDoneBindingLines(lb) {
+  if (!lb) return [];
+  const out = [];
+  if (lb.status)
+    out.push(
+      `${LINEAR_BINDING_LABEL} ${lb.status.on === true ? "켜짐" : "꺼짐"}(${lb.status.reason})`,
+    );
+  if (lb.result) out.push(renderLinearBindingResultLine(lb.result));
+  return out;
+}
+
 // HYK-255-g-aux-render-1 커밋 2 (D3 ⑵) -- ㄱ-4 «UNDECIDABLE N» 에 사유 분포를
 // 붙인다: «UNDECIDABLE 2(사유: HTTP_FAILED 1 · RATE_LIMITED 1)». 사유는 wire 가
 // 이미 받은 판정(gate4.undecidableReasons = {사유 코드: 건수})에서 전달한다 --
@@ -426,7 +515,9 @@ function buildGate4CacheLines(gate4) {
   return lines;
 }
 
-function buildGaSection(gate4, auxNote, gateAux) {
+// gateExtras = {gate3Record, linearBinding} -- 둘 다 «별개 입력»(커버리지 · 확인 수에 더하지 않는다 · 없으면 줄 0개).
+function buildGaSection(gate4, auxNote, gateAux, gateExtras = {}) {
+  const { gate3Record, linearBinding } = gateExtras;
   const lines = ["ㄱ 설계된 정지:"];
   if (gate4.known === true) {
     lines.push(
@@ -447,6 +538,10 @@ function buildGaSection(gate4, auxNote, gateAux) {
   } else {
     lines.push(`- 외부 독립 앵커로 확인: UNKNOWN(${gate4.reason})`);
   }
+  // HYK-255-g3-record-1 -- ㄱ-3 GitHub 기록(별도 줄 · G4 ⓐ): 입력이 없으면 줄 0개 · 커버리지 두 줄은 아래에서 그대로.
+  lines.push(...renderGate3RecordLines(gate3Record));
+  // HYK-255-linear-binding-1 -- Linear Done 결속 확인(ㄱ-3 줄 뒤 · 보조 관측 앞 · 커버리지 두 줄 무변): 입력이 없으면 줄 0개.
+  lines.push(...renderLinearDoneBindingLines(linearBinding));
   lines.push(`- ORCH-writeable 보조 관측: ${auxNote} — 독립 계수에 미산입`);
   const gateAuxLine = renderGateAuxObservationLine(gateAux);
   if (gateAuxLine) lines.push(gateAuxLine);
@@ -707,6 +802,10 @@ function buildHealthSection({ collectors, lastAliveMs, coverageGaps }) {
   return lines;
 }
 
+// 선언문 범위 절 -> 보고서에 싣는 줄들(비었거나 배열이 아니면 0줄 · 있으면 절 뒤 빈 줄 1개).
+const declarationScopeBlock = (lines) =>
+  Array.isArray(lines) && lines.length > 0 ? [...lines, ""] : [];
+
 // buildPartialCountReport(input) -> 보고문 텍스트. 첫 줄 = PARTIAL 배너
 // (필수 문면 1 -- 이 위에 아무것도 오지 않는다).
 export function buildPartialCountReport({
@@ -747,12 +846,19 @@ export function buildPartialCountReport({
   // renderQualificationLine 결과(부분 있음 · 또는 원인을 가진 «없음» 줄) · qualificationDiagLine = 종류 설정 읽기 실패 사유 한 줄(없으면 undefined = 새 줄 0개).
   qualificationLine,
   qualificationDiagLine,
+  // HYK-255-skipday-scope-1 -- 기본값 undefined -> 새 줄 0개(미결선 호출자 · 자격 «없음» 회차 회귀 0). 값 = renderDeclarationScopeLines 결과(자격 «부분 있음» 회차에만 비어 있지 않다) -- 꼬리(금지 해석 줄) 앞에 싣는다.
+  declarationScopeLines,
   // HYK-255-p5a-perm-1 -- 기본값 undefined -> ㄴ 절 새 줄 0개 · 분자 합산 0(미결선 호출자 회귀 0). 값 =
   // summarizePermissionRecords 결과 + 수집 부가 칸(wire 의 collectPermissionAnswers) 또는 {known:false, reason}.
   permissionAnswers,
   // HYK-255-p3-gh-1 -- 기본값 undefined -> ㄴ 절 새 줄 0개 · 분자 합산 0(미결선 호출자 회귀 0). 값 = assembleGithubHumanActions 결과(2R:
   // 실시간 목록 3종) + 수집 부가 칸(wire 의 collectGithubHumanActions) · 미조회 {known:false, unchecked:true, reason} · 수집 실패 {known:false, reason}.
   githubHumanActions,
+  // HYK-255-g3-record-1 -- 기본값 undefined -> ㄱ 절 새 줄 0개(미결선 호출자 회귀 0). 값 = wire 의 collectGate3Record 결과(독립 확인 · 미조회 · UNKNOWN).
+  // 커버리지 상수 · ㄱ-4 확인 수와 «별개 입력» -- 둘 어디에도 더하지 않는다.
+  gate3Record,
+  // HYK-255-linear-binding-1 -- ㄱ 절 «Linear Done 결속 확인» 입력 {status, result}(기본 undefined = 새 줄 0개 · 커버리지 · 확인 수 · ㄴ 분자에 더하지 않는다).
+  linearBinding,
 }) {
   const lines = [];
   lines.push("집계 성격: PARTIAL — 전수 아님");
@@ -785,7 +891,12 @@ export function buildPartialCountReport({
     "(기준 단위: 배달·소비 = 레코드 수 · 영수증 결손 = 영수증 없는 고유 라벨 수 — 단위가 달라 «배달−소비=결손»이 성립하지 않음)",
   );
   lines.push("");
-  lines.push(...buildGaSection(gate4, auxNote, gateAuxObservation));
+  lines.push(
+    ...buildGaSection(gate4, auxNote, gateAuxObservation, {
+      gate3Record,
+      linearBinding,
+    }),
+  );
   lines.push("");
   lines.push(
     ...buildLnSection(
@@ -801,6 +912,7 @@ export function buildPartialCountReport({
   lines.push("");
   lines.push(...buildHealthSection({ collectors, lastAliveMs, coverageGaps }));
   lines.push("");
+  lines.push(...declarationScopeBlock(declarationScopeLines));
   lines.push(
     "금지 해석: «확인된 N건»은 «기간 내 총 N회» 또는 «ㄴ=0»을 뜻하지 않음",
   );
@@ -1519,6 +1631,13 @@ export function renderConfirmedZeroStreakLine(streak) {
 //   동시 배달 최대(`concurrentTracksMax`)는 계속 기록하되(쓰는 쪽 무변) 판정에는 쓰지 않는다. 지나간 날도 일별 줄에 이미 적힌 값으로 같은 기준에서 다시 센다(줄 · 원장 수정 0 · 순수 함수).
 // ⚠️ 이 기준은 «기계로 센 범위» 의 기준일 뿐이다 -- 기계로 못 세는 개입은 이 줄 밖이고, «1-C 판정 자격» 줄은 이 계산이 직접 바꾸지 않는다(자격 줄 = computeQualification 이 이 결과를 읽어 정한다).
 // 관측 일수 · 배달 문턱 · 마지막 회차 컷 · 기준 변경일의 값(7 · 4 · 23:30 · 2026-11-17)은 코드에 없다 -- 설정 파일에서 읽어 인자로 넘어온다(partial-count-report.mjs).
+//
+// HYK-255-skipday-scope-1 (한용 확정 · 전달 #20261123-1740 확정 1) -- 적은 날 건너뜀. 그날 사유를 «끊김 사유» 와 «적은 날 사유» 둘로 가른다:
+//   적은 날 사유 = 배달(24시간 창)이 «정수» 이고 기준 K 미만(0 포함) 하나뿐 · 그 밖(줄 없음 · 줄 중복 · dailyBreakReasons 전부 · 배달 값 없음 · 마지막 회차 컷 미달) = 끊김 사유.
+//   순서 = 끊김 사유 ≥ 1 이면 끊김(적은 날 사유도 함께 적는다) -> 아니고 적은 날 사유가 있으면 건너뜀(일한 날에도 끊김에도 더하지 않는다 · 설정 lowDayHandling 이 skip 일 때만)
+//   -> 둘 다 없으면 셈(일한 날). 설정 lowDayHandling 이 break 면 적은 날 = 끊김(건너뜀 이전 동작). met = 일한 날 ≥ 관측 일수(건너뛴 날은 합산하지 않는다) ·
+//   달력 기간 = 마지막 끊김 다음 날 ~ 어제(건너뛴 날 포함). 건너뜀 연속 상한은 두지 않는다(설계 (나)-6).
+//   ⚠️ 건너뜀은 «그날 기계로 센 개입이 0» 임만 뜻한다 -- 기계로 못 세는 개입 부재의 증명도 «배달 기록이 조용히 고장 나 0 이 된 날» 의 구별도 아니다(줄 문면에 그 한계를 싣는다).
 // ---------------------------------------------------------------------------
 
 const MACHINE_SCOPE_LINE_PREFIX = "기계 계수 범위 기준: ";
@@ -1542,19 +1661,29 @@ export function isCalendarDay(text) {
   );
 }
 
-// 그날 줄들 -> 기계 계수 끊김 사유(없으면 []). 줄이 하나일 때만 배달 · 마지막 회차를 본다(줄 없음 · 줄 중복은 그 사유가 이미 끊김).
+// 적은 날 처리 값(설정 lowDayHandling) -- skip = 건너뜀 · break = 끊김(건너뜀 이전 동작). 이 두 낱말만 코드가 안다(기본 날짜 · 판 번호는 설정에서만).
+export const LOW_DAY_HANDLING = Object.freeze({ SKIP: "skip", BREAK: "break" });
+const LOW_DAY_HANDLING_VALUES = new Set(Object.values(LOW_DAY_HANDLING));
+export const isLowDayHandling = (v) => LOW_DAY_HANDLING_VALUES.has(v);
+
+// 그날 줄들 -> 기계 계수 사유 목록 [{text, low}](없으면 []). low = true 가 «적은 날 사유»(배달 정수 < 기준 · 0 포함) 하나뿐이고 나머지는 전부 끊김 사유.
+// 줄이 하나일 때만 배달 · 마지막 회차를 본다(줄 없음 · 줄 중복은 그 사유가 이미 끊김).
 // 사유 순서 = 기존 사유 -> 배달 -> 마지막 회차. 사유 문면에 « — »(보고 줄 구분자)를 쓰지 않는다.
 function machineScopeDayReasons(entries, criteria) {
-  const reasons = [...breakReasonsForDay(entries)];
+  const reasons = breakReasonsForDay(entries).map((text) => ({
+    text,
+    low: false,
+  }));
   if (!entries || entries.length !== 1) return reasons;
   const { minDeliveredPerDay, lastTickCutoffKst } = criteria;
   const delivered = entries[0].delivered;
   if (!isCount(delivered)) {
-    reasons.push("배달 값 없음");
+    reasons.push({ text: "배달 값 없음", low: false });
   } else if (delivered < minDeliveredPerDay) {
-    reasons.push(
-      `배달(24시간 창) ${delivered}건 < 기준 ${minDeliveredPerDay}건`,
-    );
+    reasons.push({
+      text: `배달(24시간 창) ${delivered}건 < 기준 ${minDeliveredPerDay}건`,
+      low: true,
+    });
   }
   const lastTickAtMs = entries[0].lastTickAtMs;
   const cutoffMin = parseKstClockMinutes(lastTickCutoffKst);
@@ -1562,12 +1691,21 @@ function machineScopeDayReasons(entries, criteria) {
     const msOfKstDay =
       (((lastTickAtMs + KST_OFFSET_MS) % DAY_MS) + DAY_MS) % DAY_MS;
     if (msOfKstDay < cutoffMin * 60 * 1000) {
-      reasons.push(
-        `마지막 회차가 자정 전에 끊김(마지막 회차 ${formatKst(lastTickAtMs).slice(11, 16)} < ${lastTickCutoffKst} KST)`,
-      );
+      reasons.push({
+        text: `마지막 회차가 자정 전에 끊김(마지막 회차 ${formatKst(lastTickAtMs).slice(11, 16)} < ${lastTickCutoffKst} KST)`,
+        low: false,
+      });
     }
   }
   return reasons;
+}
+
+// 그날 사유 목록 -> "break" | "skip" | "count". 끊김 사유가 하나라도 있으면 끊김(적은 날 사유보다 먼저 본다 -- 건너뛴 날의 개입이 끊김이 되는 길) ·
+// 적은 날 사유뿐이면 설정이 skip 일 때만 건너뜀(break 면 끊김) · 사유 0 = 셈.
+function classifyMachineScopeDay(reasons, lowDayHandling) {
+  if (reasons.some((r) => !r.low)) return "break";
+  if (reasons.length === 0) return "count";
+  return lowDayHandling === LOW_DAY_HANDLING.SKIP ? "skip" : "break";
 }
 
 export function computeMachineScope({
@@ -1577,49 +1715,89 @@ export function computeMachineScope({
   minDeliveredPerDay,
   lastTickCutoffKst,
   criterionChangedOn,
+  // 기본 = break(건너뜀 이전 동작 · 모르면 보수 쪽). 보고 결선은 설정 값을 넘긴다(설정을 못 읽으면 이 함수까지 오지 않는다 = UNKNOWN).
+  lowDayHandling = LOW_DAY_HANDLING.BREAK,
+  lowDayHandlingChangedOn = null,
 }) {
   const byDay = groupDailyLinesByDay(lines);
   const toDay = addKstDays(kstDayOf(nowMs), -1);
   const criteria = { minDeliveredPerDay, lastTickCutoffKst };
   let day = toDay;
   let days = 0;
+  let skippedDays = 0;
   let fromDay = null;
   for (;;) {
-    const reasons = machineScopeDayReasons(byDay.get(day), criteria);
-    if (reasons.length > 0) {
+    // 안전 상한: 줄 없는 날은 반드시 끊김이라 센 날 + 건너뛴 날이 줄 있는 날 수를 넘을 수 없다 -- 그 불변식이 깨져도 무한 루프가 되지 않는다.
+    const reasons =
+      days + skippedDays > byDay.size
+        ? [{ text: "줄 없음", low: false }]
+        : machineScopeDayReasons(byDay.get(day), criteria);
+    const kind = classifyMachineScopeDay(reasons, lowDayHandling);
+    if (kind === "break") {
       return {
         known: true,
         met: days >= observationDays,
         days,
-        // 날짜 범위 = 실제로 센 날들(가장 이른 센 날 ~ 어제). 센 날 0 = 범위 없음.
+        skippedDays,
+        // 달력 기간 = 마지막 끊김 다음 날 ~ 어제(일한 날 · 건너뛴 날 모두 포함). 센 날 + 건너뛴 날 0 = 기간 없음.
         fromDay,
-        toDay: days > 0 ? toDay : null,
+        toDay: days + skippedDays > 0 ? toDay : null,
         observationDays,
         minDeliveredPerDay,
         lastTickCutoffKst,
         criterionChangedOn,
-        lastBreak: { day, reasons },
+        lowDayHandling,
+        lowDayHandlingChangedOn,
+        lastBreak: { day, reasons: reasons.map((r) => r.text) },
       };
     }
-    days += 1;
+    if (kind === "skip") skippedDays += 1;
+    else days += 1;
     fromDay = day;
     day = addKstDays(day, -1);
   }
 }
 
-// 보고 줄 -- «기계 계수 범위 기준: 충족|미충족 — 연속 N일 / 기준 M일(배달(24시간 창) ≥ K건 · 마지막 회차 ≥ HH:MM KST · 끊김 사유 0) · 센 날 <첫날>~<끝날> · 마지막 끊김 … — … · 기준 변경 <날짜>».
+// 건너뜀이 켜진 줄만 건너뛴 날 토막 · 건너뜀 날짜를 싣는다(break 면 건너뜀 이전 줄 모양).
+const isSkipOn = (scope) => scope.lowDayHandling === LOW_DAY_HANDLING.SKIP;
+// «기계 계수 범위 기준» 줄과 «1-C 판정 자격» 줄이 같이 쓰는 한계 문면 -- 건너뜀 회차 여부와 무관하게 늘 싣는다(모순 칸 미적용 · 판정 #20261123-1825 덧붙임).
+const SILENT_ZERO_LIMIT_TEXT =
+  "배달 기록이 조용히 고장 나 0 이 된 날은 쉬는 날과 구별되지 않는다";
+
+function renderSkipSegment(scope) {
+  return isSkipOn(scope)
+    ? ` · 건너뛴 날 ${scope.skippedDays}일(배달 ${scope.minDeliveredPerDay}건 미만 · 끊김 사유 0 · 연속을 더하지도 끊지도 않음)`
+    : "";
+}
+
+function renderScopeTail(scope) {
+  const skipNote = isSkipOn(scope) ? " · 건너뛴 날도 기계로 센 범위만" : "";
+  const skipChange =
+    isSkipOn(scope) && scope.lowDayHandlingChangedOn
+      ? ` · 건너뜀 ${scope.lowDayHandlingChangedOn}`
+      : "";
+  return (
+    `기계로 센 범위의 기준일 뿐 · 기계로 못 세는 개입 미포함${skipNote} · ${SILENT_ZERO_LIMIT_TEXT} · ` +
+    `기준 변경 ${scope.criterionChangedOn}${skipChange}(지나간 날도 같은 기준으로 다시 셈)`
+  );
+}
+
+// 보고 줄 -- «기계 계수 범위 기준: 충족|미충족 — 일한 날 N일 / 기준 M일(배달(24시간 창) ≥ K건 · 마지막 회차 ≥ HH:MM KST · 끊김 사유 0) · 건너뛴 날 S일(…) · 달력 기간 <첫날>~<끝날> · 마지막 끊김 … — … · 기준 변경 <날짜> · 건너뜀 <날짜>».
 // 모르면(설정 · 일별 줄을 못 읽음) UNKNOWN(사유) -- 충족도 미충족도 아니다. 기준 숫자 · 날짜 범위는 계산이 쓴 값 그대로다.
 export function renderMachineScopeLine(scope) {
   if (!scope || scope.known !== true) {
     return `${MACHINE_SCOPE_LINE_PREFIX}UNKNOWN(${scope?.reason ?? "사유 미상"})`;
   }
-  const range = scope.days > 0 ? `${scope.fromDay}~${scope.toDay}` : "없음";
+  const range =
+    scope.days + (scope.skippedDays ?? 0) > 0
+      ? `${scope.fromDay}~${scope.toDay}`
+      : "없음";
   const brk = scope.lastBreak;
   return (
     `${MACHINE_SCOPE_LINE_PREFIX}${scope.met ? "충족" : "미충족"} — ` +
-    `연속 ${scope.days}일 / 기준 ${scope.observationDays}일(배달(24시간 창) ≥ ${scope.minDeliveredPerDay}건 · 마지막 회차 ≥ ${scope.lastTickCutoffKst} KST · 끊김 사유 0) · ` +
-    `센 날 ${range} · 마지막 끊김 ${brk.day} ${brk.reasons.join(", ")} — ` +
-    `기계로 센 범위의 기준일 뿐 · 기계로 못 세는 개입 미포함 · 기준 변경 ${scope.criterionChangedOn}(지나간 날도 같은 기준으로 다시 셈)`
+    `일한 날 ${scope.days}일 / 기준 ${scope.observationDays}일(배달(24시간 창) ≥ ${scope.minDeliveredPerDay}건 · 마지막 회차 ≥ ${scope.lastTickCutoffKst} KST · 끊김 사유 0)` +
+    `${renderSkipSegment(scope)} · 달력 기간 ${range} · 마지막 끊김 ${brk.day} ${brk.reasons.join(", ")} — ` +
+    renderScopeTail(scope)
   );
 }
 
@@ -1627,8 +1805,10 @@ export function renderMachineScopeLine(scope) {
 // HYK-255-p2b-qual-1 (판정 2026-11-15 1804 ③ · 2026-11-16 1004) -- «1-C 판정 자격» 줄 계산(순수 함수 · I/O 0). 자격 «부분 있음» ⇔ P2a 기계 계수 범위 기준 «충족» ∧
 // 종류 설정(partial-count-uncountable-kinds.json)을 읽어 종류가 1개 이상 있고 모든 종류의 처리 값이 아는 값. 아니면 «없음» -- HYK-255-p2d-nonecause-1(판정 2026-11-16 1804 상신 1)부터
 // «없음» 줄은 머리와 꼬리 사이에 «실제 원인 1개» 를 적는다(원인 3종 · 고르는 곳 = 순수 함수 qualificationNoneCause 한 곳 · 렌더는 그 값만 문면으로).
-// 종류 이름 · 수 · 처리는 코드에 없다 -- 설정에서 읽은 배열이 인자로 넘어온다(처리 값 세 낱말만 코드가 안다). 잠정 ⓒ(Q-4 한용 답 대기): 처리 방식은 분기가 아니라 값이라
+// 종류 이름 · 수 · 처리는 코드에 없다 -- 설정에서 읽은 배열이 인자로 넘어온다(처리 값 세 낱말만 코드가 안다). 처리 방식은 분기가 아니라 값이라
 // 뒤집히면 설정과 문면만 바뀐다. ⚠️ 이 줄은 «ㄴ=0» 판정도 1단계 «완료» 선언도 아니다(선언 = P6 · 한용) -- 값 범위 표기이고 «알려진» = 열린 집합(K 는 하한).
+// HYK-255-skipday-scope-1 (확정 3 · 1-C Q-4 = 영구 부분 + 선언문에 범위 명시) -- «정의상 제외» 의 잠정 꼬리표를 뗐다(처리 값 = excluded-by-definition · 옛 …-provisional 은 모르는 값).
+// 자격 «부분 있음» 회차에만 renderDeclarationScopeLines 가 범위 밖 종류를 설정의 쉬운 말(plain)로 싣는다.
 // ---------------------------------------------------------------------------
 
 // «없음» 줄의 머리 · 꼬리(뜻 무변). 옛 상수 줄(머리 — 꼬리) = ONE_C_QUALIFICATION_NONE_LINE -- 새 렌더는 쓰지 않고, 옛 보고서 · 상태 파일 호환(되읽기)과 시험의 «옛 문면» 기준으로만 남긴다.
@@ -1655,7 +1835,7 @@ export const QUALIFICATION_DIAG_PREFIX = "종류 설정 진단: ";
 export const UNCOUNTABLE_HANDLING = Object.freeze({
   PREVENTION_PROOF: "prevention-proof",
   PARTIAL_SCOPE: "partial-scope",
-  EXCLUDED_PROVISIONAL: "excluded-by-definition-provisional",
+  EXCLUDED_BY_DEFINITION: "excluded-by-definition",
 });
 const UNCOUNTABLE_HANDLING_VALUES = new Set(
   Object.values(UNCOUNTABLE_HANDLING),
@@ -1694,11 +1874,15 @@ export function computeQualification({ machineScope, kinds } = {}) {
   const partialScope = countHandling(kinds, UNCOUNTABLE_HANDLING.PARTIAL_SCOPE);
   const excluded = countHandling(
     kinds,
-    UNCOUNTABLE_HANDLING.EXCLUDED_PROVISIONAL,
+    UNCOUNTABLE_HANDLING.EXCLUDED_BY_DEFINITION,
   );
   return {
     state: "partial",
     days: machineScope.days,
+    skippedDays: machineScope.skippedDays ?? 0,
+    fromDay: machineScope.fromDay ?? null,
+    toDay: machineScope.toDay ?? null,
+    lowDayHandling: machineScope.lowDayHandling ?? LOW_DAY_HANDLING.BREAK,
     observationDays: machineScope.observationDays,
     minDeliveredPerDay: machineScope.minDeliveredPerDay,
     criterionChangedOn: machineScope.criterionChangedOn,
@@ -1709,7 +1893,8 @@ export function computeQualification({ machineScope, kinds } = {}) {
   };
 }
 
-// «없음» = 머리 — 원인 1개 — 꼬리(원인이 없거나 모르는 값이면 판독 불가로 -- 원인 없는 «없음» 렌더 0) · «부분 있음» = 값 범위 표기(긍정 문면 0 · «알려진» 낱말 필수 · 바이트 무변).
+// «없음» = 머리 — 원인 1개 — 꼬리(원인이 없거나 모르는 값이면 판독 불가로 -- 원인 없는 «없음» 렌더 0) · «부분 있음» = 값 범위 표기(긍정 문면 0 · «알려진» 낱말 필수).
+// «부분 있음» 은 일한 날 · (건너뜀이 켜졌으면) 건너뛴 날 · 달력 기간을 함께 싣고 범위 밖이 영구 부분임을 적는다. «없음» 줄은 바이트 무변.
 export function renderQualificationLine(qualification) {
   if (qualification?.state !== "partial") {
     const cause = isNoneCause(qualification?.cause)
@@ -1718,10 +1903,37 @@ export function renderQualificationLine(qualification) {
     return `${ONE_C_QUALIFICATION_NONE_HEAD} — ${QUALIFICATION_NONE_CAUSE_TEXT[cause]} — ${ONE_C_QUALIFICATION_NONE_TAIL}`;
   }
   const q = qualification;
+  const skipSegment = isSkipOn(q)
+    ? ` · 건너뛴 날 ${q.skippedDays}일 · 달력 기간 ${q.fromDay}~${q.toDay}`
+    : "";
   return (
-    `${ONE_C_QUALIFICATION_PREFIX}부분 있음 — 기계 계수 범위 기준 충족(연속 ${q.days}일 / 기준 ${q.observationDays}일 · 배달(24시간 창) ≥ ${q.minDeliveredPerDay}건 · 기준 변경 ${q.criterionChangedOn}) · ` +
-    `알려진 못 세는 종류 ${q.total} = 예방 증명 ${q.preventionProof} / 부분 범위 ${q.partialScope} / 정의상 제외(잠정) ${q.excluded} · «ㄴ=0» 판정 아님`
+    `${ONE_C_QUALIFICATION_PREFIX}부분 있음 — 기계 계수 범위 기준 충족(일한 날 ${q.days}일 / 기준 ${q.observationDays}일${skipSegment} · 배달(24시간 창) ≥ ${q.minDeliveredPerDay}건 · 기준 변경 ${q.criterionChangedOn}) · ` +
+    `알려진 못 세는 종류 ${q.total} = 예방 증명 ${q.preventionProof} / 부분 범위 ${q.partialScope} / 정의상 제외 ${q.excluded} · 범위 밖은 영구 부분 · «ㄴ=0» 판정 아님`
   );
+}
+
+const plainRow = (k) => `${k.id} ${k.plain}`;
+
+// «선언문 범위 시안» 절(보고서 끝 쪽 · 자격 «부분 있음» 회차에만 -- 그 밖 [] = 0줄). 종류 이름 · 수 · 쉬운 말은 전부 설정(kinds 행)에서 온다 -- 코드는 구조만 안다.
+//   범위 밖(영구 부분) = handling 이 부분 범위인 행 · 정의상 개입이 아닌 것 = 정의상 제외 행(쉬운 말 + 한계 줄 plainLimit 바로 아래) · 예방 증명 행은 범위 안으로 들어온 것이라 범위 밖에 없다.
+export function renderDeclarationScopeLines({ qualification, kinds } = {}) {
+  if (qualification?.state !== "partial" || !Array.isArray(kinds)) return [];
+  const rowsOf = (h) => kinds.filter((k) => k?.handling === h);
+  const outside = rowsOf(UNCOUNTABLE_HANDLING.PARTIAL_SCOPE);
+  const defined = rowsOf(UNCOUNTABLE_HANDLING.EXCLUDED_BY_DEFINITION);
+  const proven = rowsOf(UNCOUNTABLE_HANDLING.PREVENTION_PROOF);
+  const skipNote = isSkipOn(qualification)
+    ? ` · 건너뛴 날 ${qualification.skippedDays}일(일이 적어 세지 않은 날 · 그날도 기계가 센 개입은 0)`
+    : "";
+  return [
+    "선언문 범위 시안(종류 설정 파일에서 읽음 · 이 절을 선언 PR 본문에 그대로 옮긴다):",
+    `- 기간: 달력 ${qualification.fromDay}~${qualification.toDay} · 일한 날 ${qualification.days}일${skipNote}`,
+    `- 기계로 못 세는 알려진 종류 ${outside.length}개는 이 선언의 범위 밖이다(영구 부분). 목록에 없는 개입도 있을 수 있다(위 ${outside.length}개는 하한):`,
+    ...outside.map((k) => `  · ${plainRow(k)}`),
+    `- 정의상 개입이 아닌 것:${defined.length === 0 ? " 없음" : ""}`,
+    ...defined.flatMap((k) => [`  · ${plainRow(k)}`, `    ${k.plainLimit}`]),
+    `- 예방 증명이 선 종류(범위 안으로 들어옴): ${proven.length === 0 ? "없음" : proven.map(plainRow).join(" / ")}`,
+  ];
 }
 
 const QUALIFICATION_LINE_RE = /^1-C 판정 자격: (부분 있음|없음)(?: — .*)?$/m;

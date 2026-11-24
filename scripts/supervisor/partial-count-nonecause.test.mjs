@@ -19,7 +19,8 @@ const NOW = Date.parse("2026-11-15T15:00:00+09:00");
 const SCOPE_CONFIG_PATH = "scripts/supervisor/partial-count-machine-scope.json";
 const KINDS_CONFIG_PATH =
   "scripts/supervisor/partial-count-uncountable-kinds.json";
-const KINDS_SCHEMA = "partial-count-uncountable-kinds/v1";
+// HYK-255-skipday-scope-1 바뀐 문면(뜻 무변): 종류 설정 스키마 v1 -> v2(plain 필수) · 처리 값 excluded-by-definition-provisional -> excluded-by-definition(정의상 제외 확정).
+const KINDS_SCHEMA = "partial-count-uncountable-kinds/v2";
 const QUAL_PREFIX = "1-C 판정 자격: ";
 const DIAG_PREFIX = "종류 설정 진단: ";
 const FAIL404 = { ok: false, status: 404, json: null, linkHeader: null };
@@ -46,6 +47,9 @@ const SCOPE_CFG = {
   minDeliveredPerDay: 3,
   lastTickCutoffKst: "23:15",
   criterionChangedOn: "2026-11-01",
+  // 설정 v3 -- 이 파일의 합성 설정은 break(건너뜀 이전 동작 · 줄 모양 무변 · 건너뜀 쪽 시험은 partial-count-skipday.test.mjs).
+  lowDayHandling: "break",
+  lowDayHandlingChangedOn: "2026-11-10",
 };
 
 // 부분 있음 줄 -- 합성 값 7/7/(배달 문턱) · 15 = 0/14/1.
@@ -116,7 +120,7 @@ function git(cwd, args) {
 
 const scopeJson = (over = {}) =>
   JSON.stringify({
-    schema_version: "partial-count-machine-scope/v2",
+    schema_version: "partial-count-machine-scope/v3",
     ...SCOPE_CFG,
     ...over,
   });
@@ -140,6 +144,10 @@ function buildRepo(kindsConfig, { scopeConfig = scopeJson() } = {}) {
 const kindRow = (i, handling) => ({
   id: `k${String(i).padStart(2, "0")}`,
   name: `합성 종류 ${i}`,
+  plain: `합성 쉬운 말 ${i}`,
+  ...(handling === "excluded-by-definition"
+    ? { plainLimit: `합성 한계 ${i}` }
+    : {}),
   handling,
   source: `synthetic:${i}`,
 });
@@ -148,7 +156,7 @@ const kindsJson = (rows, over = {}) =>
 const GOOD_KINDS = kindsJson([
   kindRow(1, "partial-scope"),
   kindRow(2, "partial-scope"),
-  kindRow(3, "excluded-by-definition-provisional"),
+  kindRow(3, "excluded-by-definition"),
 ]);
 const GOOD_KIND_ROWS = JSON.parse(GOOD_KINDS).kinds;
 
@@ -327,7 +335,7 @@ test("부분 있음 줄: 머리 · 꼬리 뜻 무변 · 기준 문면만 새 뜻
   assert.equal(line, PARTIAL_LINE_BASE);
   assert.ok(
     line.startsWith(
-      "1-C 판정 자격: 부분 있음 — 기계 계수 범위 기준 충족(연속 7일 / 기준 7일 · ",
+      "1-C 판정 자격: 부분 있음 — 기계 계수 범위 기준 충족(일한 날 7일 / 기준 7일 · ",
     ),
   );
   assert.ok(
@@ -337,7 +345,7 @@ test("부분 있음 줄: 머리 · 꼬리 뜻 무변 · 기준 문면만 새 뜻
   );
   assert.ok(
     line.includes(
-      "알려진 못 세는 종류 15 = 예방 증명 0 / 부분 범위 14 / 정의상 제외(잠정) 1 · «ㄴ=0» 판정 아님",
+      "알려진 못 세는 종류 15 = 예방 증명 0 / 부분 범위 14 / 정의상 제외 1 · 범위 밖은 영구 부분 · «ㄴ=0» 판정 아님",
     ),
     "꼬리 바이트 무변",
   );
@@ -703,7 +711,7 @@ test("통지: «없음(어느 원인이든) -> 부분 있음» = 1장 무변(줄
     assert.match(body, /없음 -> 부분 있음/);
     assert.match(
       body,
-      /알려진 못 세는 종류 3 = 예방 증명 0 \/ 부분 범위 2 \/ 정의상 제외\(잠정\) 1/,
+      /알려진 못 세는 종류 3 = 예방 증명 0 \/ 부분 범위 2 \/ 정의상 제외 1/,
     );
     assert.match(body, /«ㄴ=0» 판정이 아닙니다/);
     assert.equal(fx.tick(r.partial, 2000).noticePath, null, "같은 상태 0장");

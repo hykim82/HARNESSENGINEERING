@@ -1000,6 +1000,53 @@ test("⑷ 여유 입력(ㄱ-4 · D1 후보 있음) -> P3 호출 ≤ 2 · 회차 
   assert.ok(firstList > lastNonList, "P3 는 ㄱ-4 · D1 뒤에 부른다");
 });
 
+// HYK-255-g3-record-1 (설계 (라) · 뜻 무변 단언 추가) -- ㄱ-3 GitHub 기록(S4)은 P3 «뒤» 남는 몫만 쓴다. 켜도 P3 목록 호출 수 · 순서 · 값은 끈 회차와 같다.
+test("⑷ ㄱ-3 GitHub 기록(S4)을 켜도 P3 몫 무변: P3 목록 호출 수 · 순서 · 값은 끈 회차와 같고 S4 목록은 P3 뒤에 min(2, 12 - 앞 사용) 몫으로만 불린다(총 ≤ 12)", async () => {
+  const lists = (t) => ({ issueComments: [issueComment({ atMs: inWin(t) })] });
+  const off = await runLists(lists, {
+    ubCounts: [2, 1],
+    first: "issueComments",
+  });
+  const now = off.now;
+  const repo = buildRepo([2, 1]);
+  const { fetchJson: inner, calls } = makeFetch(repo, {
+    lists: lists(now),
+    nowMs: now,
+  });
+  const g3Calls = [];
+  const wrapped = async (args) => {
+    if (/\/pulls\?state=all&base=gate3-record/.test(args.url)) {
+      g3Calls.push(calls.all.length);
+      return ok200([]);
+    }
+    return inner(args);
+  };
+  const on = await runDefault(repo, wrapped, {
+    now,
+    gate3RecordBase: "gate3-record",
+  });
+  // P3 는 켜도 끈 회차와 같다(호출 수 · 순서 · 값).
+  assert.deepEqual(calls.order, off.calls.order);
+  assert.equal(
+    on.githubHumanActions.humanTotal,
+    off.result.githubHumanActions.humanTotal,
+  );
+  assert.equal(
+    on.githubHumanActions.budget,
+    off.result.githubHumanActions.budget,
+  );
+  // S4 몫 = min(2, 12 - 앞 셋이 쓴 수) -- 시험이 관측한 «앞 셋 사용» 으로 손 계산한 기대(목록 1 + 상세 0: 빈 목록).
+  const usedBeforeS4 = calls.all.length;
+  const s4Budget = Math.min(2, 12 - usedBeforeS4);
+  assert.equal(g3Calls.length, s4Budget >= 1 ? 1 : 0, "S4 목록 호출 수");
+  assert.deepEqual(
+    g3Calls,
+    s4Budget >= 1 ? [usedBeforeS4] : [],
+    "P3 뒤에 부른다",
+  );
+  assert.ok(usedBeforeS4 + g3Calls.length <= 12, "회차 총 ≤ 12 무변");
+});
+
 test("⑷ 사건 목록 호출 0 -- 어떤 회차에서도 /events 를 부르지 않는다 · 코드에 사건 목록 원천 0", async () => {
   for (let k = 0; k < 3; k++) {
     const { calls } = await runLists(

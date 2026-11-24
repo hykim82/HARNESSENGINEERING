@@ -3405,8 +3405,28 @@ export function buildPartialCountStepOptions({
   outboxDir,
   relayGlob,
   inboxDir,
+  gate3RecordBase,
+  linearBindingSwitch,
 }) {
-  return { repoRoot, watchLogPath, outboxDir, relayGlob, inboxDir };
+  // HYK-255-g3-record-1 -- gate3RecordBase 는 «값이 있을 때만» 키를 싣는다(opt-in · 안 준 호출자는 옛 옵션 모양 그대로 = 회귀 0).
+  // HYK-255-linear-binding-1 -- linearBindingSwitch({on, reason})도 «값이 있을 때만»: 상태는 켜짐/꺼짐 모두 싣고(매 회차 줄) 수집 옵션(linearBinding)은 켜짐일 때만 싣는다.
+  return {
+    repoRoot,
+    watchLogPath,
+    outboxDir,
+    relayGlob,
+    inboxDir,
+    ...(gate3RecordBase ? { gate3RecordBase } : {}),
+    ...(linearBindingSwitch
+      ? {
+          ...(linearBindingSwitch.on === true ? { linearBinding: true } : {}),
+          linearBindingStatus: {
+            on: linearBindingSwitch.on === true,
+            reason: linearBindingSwitch.reason,
+          },
+        }
+      : {}),
+  };
 }
 
 // HYK-255-outbox-aux-1-r3 (coder-task.md §2 ⓐ · REVIEW-r2 ⓑ "고치는 길"
@@ -3424,11 +3444,18 @@ export function buildPartialCountStepOptions({
 function parseRelayLedgerArgv(argv) {
   let relayGlob = null;
   let inboxDir = null;
+  let gate3RecordBase = null;
+  let linearBindingArgOn = false;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--relay-glob") relayGlob = argv[++i];
     else if (argv[i] === "--inbox-dir") inboxDir = argv[++i];
+    // HYK-255-g3-record-1 -- ㄱ-3 GitHub 기록(S4)의 기록 가지 이름(opt-in · 없으면 null).
+    else if (argv[i] === "--gate3-record-base") gate3RecordBase = argv[++i];
+    // HYK-255-linear-binding-1 -- Linear Done 결속 확인(S3) 수동 켜기(`--linear-binding on` · on 이 아닌 값은 켜지 않는다).
+    else if (argv[i] === "--linear-binding")
+      linearBindingArgOn = argv[++i] === "on";
   }
-  return { relayGlob, inboxDir };
+  return { relayGlob, inboxDir, gate3RecordBase, linearBindingArgOn };
 }
 
 export async function runWatchCliPartialCountStep({
@@ -3439,6 +3466,9 @@ export async function runWatchCliPartialCountStep({
   result,
   notifyDir,
   runPartialCountStepFn,
+  // HYK-255-linear-binding-1 -- 표지 판정의 파일 입출력 주입구(시험용 · 기본 = 실제 fs).
+  existsFn = existsSync,
+  readFn = readFileSync,
 }) {
   let outboxDir = null;
   let admissionLedgerPath = null;
@@ -3449,7 +3479,15 @@ export async function runWatchCliPartialCountStep({
     else if (argv[i] === "--admission-sweep-ledger")
       admissionLedgerPath = argv[++i];
   }
-  const { relayGlob, inboxDir } = parseRelayLedgerArgv(argv);
+  const { relayGlob, inboxDir, gate3RecordBase, linearBindingArgOn } =
+    parseRelayLedgerArgv(argv);
+  // HYK-255-linear-binding-1 -- 매 회차 표지(또는 수동 인자)를 판정한다 -- 켜짐/꺼짐 어느 쪽이든 상태가 보고서에 실린다.
+  const linearBindingSwitch = resolveLinearBindingSwitch({
+    argOn: linearBindingArgOn,
+    watchDir,
+    existsFn,
+    readFn,
+  });
   const stepFn =
     runPartialCountStepFn === undefined
       ? runPartialCountStep
@@ -3466,6 +3504,8 @@ export async function runWatchCliPartialCountStep({
       outboxDir,
       relayGlob,
       inboxDir,
+      gate3RecordBase,
+      linearBindingSwitch,
     }),
   });
 }
@@ -4692,6 +4732,102 @@ function judgeTeardownArmFlag({ watchDir, existsFn, readFn }) {
       : null,
     at: isNonEmptyString(parsed.at) ? parsed.at : null,
   };
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// HYK-255-linear-binding-1 (판정 #20261123-2305 · 1905 의 4 정정 · 조건 ⑴~⑷) -- 부분 계수 보고서의 «Linear Done 결속 확인» 켜기 표지.
+// 위 teardown-arm.json 과 같은 꼴(감시 폴더 안 파일 하나 · 예약 작업 인자 변경 0 · 이 코드는 그 파일을 만들거나 지우지 않는다 -- 만들고 지우는 건 병합 뒤 책임자 켜기 판정 때
+// ORCH 가 한다). 켜짐 = 그 내용이 **JSON 객체이고 `enabled` 가 정확히 불리언 `true`** 일 때뿐 -- 없음 · 빈 파일 · 깨진 JSON · 폴더 · 배열 · 문자열 · 숫자 · 불리언/null 최상위 ·
+// enabled 키 없음 · enabled 가 true 가 아닌 값(false · "true" · 1 …)은 전부 꺼짐이고 사유 토큰이 경우마다 다르다(판정에는 쓰지 않는다 -- 켜짐은 오직 위 한 조건).
+// 감시 회차 보고서는 켜짐/꺼짐 + 사유 토큰을 «매 회차» 한 줄 싣는다(꺼진 채 조용히 지나가지 않게). 수동 보고 CLI `--linear-binding on` 은 그대로다.
+// ---------------------------------------------------------------------------
+export const LINEAR_BINDING_FLAG_FILENAME = "linear-binding.json";
+
+export const LINEAR_BINDING_FLAG_REASON = Object.freeze({
+  ENABLED: "LINEAR_BINDING_FLAG_ENABLED",
+  ABSENT: "LINEAR_BINDING_FLAG_ABSENT",
+  IS_DIRECTORY: "LINEAR_BINDING_FLAG_IS_DIRECTORY",
+  EMPTY: "LINEAR_BINDING_FLAG_EMPTY",
+  NOT_JSON: "LINEAR_BINDING_FLAG_NOT_JSON",
+  VALUE_IS_ARRAY: "LINEAR_BINDING_FLAG_VALUE_IS_ARRAY",
+  VALUE_IS_STRING: "LINEAR_BINDING_FLAG_VALUE_IS_STRING",
+  VALUE_IS_NUMBER: "LINEAR_BINDING_FLAG_VALUE_IS_NUMBER",
+  NOT_OBJECT: "LINEAR_BINDING_FLAG_NOT_OBJECT",
+  ENABLED_KEY_MISSING: "LINEAR_BINDING_FLAG_ENABLED_KEY_MISSING",
+  ENABLED_NOT_TRUE: "LINEAR_BINDING_FLAG_ENABLED_NOT_TRUE",
+  READ_FAILED: "LINEAR_BINDING_FLAG_READ_FAILED",
+});
+// 수동 인자 `--linear-binding on` 으로 켠 회차의 사유 토큰(표지 판정과 별개 -- 인자가 표지보다 앞선다).
+export const LINEAR_BINDING_ARG_ON_REASON = "LINEAR_BINDING_ARG_ON";
+
+// 존재 · 읽기 단계(fail-closed). 빈 값(없음 · 폴더 · 읽기 실패 · 빈 파일)이면 여기서 끝난다.
+function readLinearBindingFlagRaw({ watchDir, existsFn, readFn }) {
+  const R = LINEAR_BINDING_FLAG_REASON;
+  if (
+    !isNonEmptyString(watchDir) ||
+    typeof existsFn !== "function" ||
+    typeof readFn !== "function"
+  )
+    return { ok: false, reason: R.ABSENT };
+  const flagPath = path.join(watchDir, LINEAR_BINDING_FLAG_FILENAME);
+  let exists;
+  try {
+    exists = existsFn(flagPath) === true;
+  } catch {
+    return { ok: false, reason: R.ABSENT };
+  }
+  if (!exists) return { ok: false, reason: R.ABSENT };
+  let raw;
+  try {
+    raw = readFn(flagPath, "utf8");
+  } catch (err) {
+    return {
+      ok: false,
+      reason: err && err.code === "EISDIR" ? R.IS_DIRECTORY : R.READ_FAILED,
+    };
+  }
+  if (typeof raw !== "string" || raw.trim() === "")
+    return { ok: false, reason: R.EMPTY };
+  return { ok: true, raw };
+}
+
+// 이미 JSON.parse 된 값의 «모양» 분류. null = 켜짐 조건 통과(JSON 객체 ∧ enabled === true).
+function classifyLinearBindingFlagValue(parsed) {
+  const R = LINEAR_BINDING_FLAG_REASON;
+  if (Array.isArray(parsed)) return R.VALUE_IS_ARRAY;
+  if (typeof parsed === "string") return R.VALUE_IS_STRING;
+  if (typeof parsed === "number") return R.VALUE_IS_NUMBER;
+  if (parsed === null || typeof parsed !== "object") return R.NOT_OBJECT;
+  if (!Object.prototype.hasOwnProperty.call(parsed, "enabled"))
+    return R.ENABLED_KEY_MISSING;
+  if (parsed.enabled !== true) return R.ENABLED_NOT_TRUE;
+  return null;
+}
+
+// 표지 판정 -> {on, reason}. 던지지 않는다.
+export function judgeLinearBindingFlag({ watchDir, existsFn, readFn }) {
+  const read = readLinearBindingFlagRaw({ watchDir, existsFn, readFn });
+  if (!read.ok) return { on: false, reason: read.reason };
+  let parsed;
+  try {
+    parsed = JSON.parse(read.raw);
+  } catch {
+    return { on: false, reason: LINEAR_BINDING_FLAG_REASON.NOT_JSON };
+  }
+  const bad = classifyLinearBindingFlagValue(parsed);
+  if (bad) return { on: false, reason: bad };
+  return { on: true, reason: LINEAR_BINDING_FLAG_REASON.ENABLED };
+}
+
+// 감시 회차의 스위치 = 수동 인자(on)가 있으면 그것(ARG_ON) · 아니면 표지 판정.
+export function resolveLinearBindingSwitch({
+  argOn,
+  watchDir,
+  existsFn,
+  readFn,
+}) {
+  if (argOn === true) return { on: true, reason: LINEAR_BINDING_ARG_ON_REASON };
+  return judgeLinearBindingFlag({ watchDir, existsFn, readFn });
 }
 
 // 워크트리가 지워진 «뒤»에도 쓸 수 있어야 한다(cwd=worktreePath는 그

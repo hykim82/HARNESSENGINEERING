@@ -1,7 +1,9 @@
 {
-  "schema_version": "partial-count-machine-scope/v2",
+  "schema_version": "partial-count-machine-scope/v3",
   "observationDays": 7,
   "minDeliveredPerDay": 4,
   "lastTickCutoffKst": "23:30",
-  "criterionChangedOn": "2026-11-17"
+  "criterionChangedOn": "2026-11-17",
+  "lowDayHandling": "skip",
+  "lowDayHandlingChangedOn": "2026-11-23"
 }
